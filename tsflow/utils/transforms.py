@@ -138,9 +138,6 @@ class AddIDFeature(MapTransformation):
         self.setting = setting
 
     def map_transform(self, data: DataEntry, is_train: bool) -> DataEntry:
-        # if "item_id" in data and not isinstance(data["item_id"], str):
-        #    id = np.array(data["item_id"])
-        # else:
         id = data["feat_static_cat"][0]
         if not is_train:
             id = id % self.train_length
@@ -176,11 +173,7 @@ class AddMeanFeature(MapTransformation):
             if id in self.train_means.keys():
                 scale = self.train_means[id]
             else:
-                if self.setting == Setting.MULTIVARIATE and False:
-                    k = data[self.target_field].shape[0]
-                    scale = np.array([data[self.target_field].mean(-1).mean(keepdims=True).repeat(k)])
-                else:
-                    scale = np.array([data[self.target_field].mean(-1)])
+                scale = np.array([data[self.target_field].mean(-1)])
                 scale = np.clip(scale, a_min=self.minimum_scale, a_max=np.inf)
                 self.train_means[id] = scale
         else:
