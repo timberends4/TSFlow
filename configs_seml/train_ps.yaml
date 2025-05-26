@@ -1,0 +1,112 @@
+seml:
+  name: 'tsflow_ps'
+  executable: 'experiment_ps.py'
+  output_dir: './logs'
+  project_root_dir: ..
+
+slurm:
+  experiments_per_job: 1
+  sbatch_options:
+    gres: 'gpu:1'     # num GPUs
+    mem: 32G        # memory
+    cpus-per-task: 4  # num cores
+    time: '0-16:00'   # max time, D-HH:MM
+    partition: ['gpu_a100']
+    exclude: 'gpu20'
+
+fixed:
+  setting: univariate
+  model: ps
+  logdir: logs
+  model_params:
+    backbone_params:
+      input_dim: 1
+      output_dim: 1
+      step_emb: 64
+      num_residual_blocks: 3
+      residual_block: s4
+      hidden_dim: 64
+      dropout: 0.0
+      init_skip: False
+      feature_skip: True
+    
+    use_ema: True
+    use_lags: False
+    
+    matching: ot
+    num_steps: 16
+    solver: euler
+    
+    device: cuda:0
+
+    optimizer_params: 
+        lr: 1.e-3
+
+    ema_params: 
+      beta: 0.9999
+      update_after_step: 128
+      update_every: 1
+
+  trainer_params:
+    gradient_clip_val: 0.5
+    max_epochs: 1000
+    num_sanity_val_steps: 0
+
+  # Used only in callback,
+  # the final evaluation uses 100 samples
+  evaluation_params:
+    num_samples: 16
+    use_validation_set: True
+    eval_every: 50
+    do_final_eval: True
+
+grid:
+    +configs:
+      type: choice
+      options:
+        - ./configs_seml/datasets/train_exchange_ps.yaml
+        #- ./configs_seml/datasets/train_electricity_ps.yaml
+        #- ./configs_seml/datasets/train_traffic_ps.yaml
+        #- ./configs_seml/datasets/train_ubertlc_ps.yaml
+        - ./configs_seml/datasets/train_wiki_ps.yaml
+        - ./configs_seml/datasets/train_kddcup_ps.yaml
+        #- ./configs_seml/datasets/train_m4hourly_ps.yaml
+        #- ./configs_seml/datasets/train_solar_ps.yaml
+
+    seed:
+      type: choice
+      options:
+        - 6432
+        - 6433
+        - 6434
+        - 6435
+        - 6436
+
+
+ou_kernel:
+  fixed:
+    model_params.prior_params:
+      kernel: ou
+      gamma: 1
+      context_freqs: 7
+
+se_kernel:
+  fixed:
+    model_params.prior_params:
+      kernel: se
+      gamma: 1
+      context_freqs: 7
+
+#pe_kernel:
+#  fixed:
+#    model_params.prior_params:
+#      kernel: pe
+#      gamma: 1
+#      context_freqs: 7
+
+iso_kernel:
+  fixed:
+    model_params.prior_params:
+      kernel: iso
+      gamma: 1
+      context_freqs: 7

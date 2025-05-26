@@ -1,0 +1,24 @@
+model: conditional
+
+model_params:
+  freq: H
+  normalization: longmean
+  context_length: 24 # 360 for `D`
+  prediction_length: 24 # 30 for `D`
+
+dataset_params:
+  dataset: traffic_nips
+  num_batches_per_epoch: 128
+  batch_size: 64
+
+trainer_params:
+  gradient_clip_val: 0.5
+  max_epochs: 400
+  num_sanity_val_steps: 0
+# Used only in callback,
+# the final evaluation uses 100 samples
+evaluation_params:
+  num_samples: 16
+  use_validation_set: True
+  eval_every: 20
+  do_final_eval: True

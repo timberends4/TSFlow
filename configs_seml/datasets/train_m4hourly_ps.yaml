@@ -1,0 +1,20 @@
+model: ps
+
+model_params:
+  freq: H
+  normalization: longmean
+  context_length: 336 # 360 for `D`
+  prediction_length: 48 # 30 for `D`
+  matching: ot
+
+  iterations: 4
+  alpha: 0.005
+  noise_level: 0.5
+  guidance_scale: 4
+
+dataset_params:
+  dataset: m4_hourly
+  num_batches_per_epoch: 128
+  batch_size: 64
+
+seed: 6432

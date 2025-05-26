@@ -1,0 +1,119 @@
+seml:
+  name: 'tsflow'
+  executable: 'experiment.py'
+  output_dir: './logs'
+  project_root_dir: ..
+
+slurm:
+  experiments_per_job: 1
+  sbatch_options:
+    gres: 'gpu:1'     # num GPUs
+    mem: 48G        # memory
+    cpus-per-task: 4  # num cores
+    time: '0-12:00'   # max time, D-HH:MM
+    partition: ['gpu_a100']
+    qos: deadline
+
+fixed:
+  logdir: logs
+  model_params:
+    backbone_params:
+      input_dim: 1
+      output_dim: 1
+      step_emb: 64
+      num_residual_blocks: 3
+      residual_block: s4
+      hidden_dim: 64
+      dropout: 0.0
+      init_skip: False
+      feature_skip: True
+
+    num_steps: 0
+    solver: euler
+
+    device: cuda:0
+
+    optimizer_params: 
+        lr: 1.e-3
+        weight_decay: 0.0
+
+    ema_params: 
+      beta: 0.9999
+      update_after_step: 128
+      update_every: 1
+
+grid:
+    +configs:
+      type: choice
+      options:
+        - ./configs_seml/datasets/train_exchange.yaml
+        - ./configs_seml/datasets/train_solar.yaml
+        - ./configs_seml/datasets/train_electricity.yaml
+        - ./configs_seml/datasets/train_traffic.yaml
+        - ./configs_seml/datasets/train_ubertlc.yaml
+        - ./configs_seml/datasets/train_wiki2000.yaml
+        - ./configs_seml/datasets/train_kddcup.yaml
+        - ./configs_seml/datasets/train_m4hourly.yaml
+
+    setting: 
+      type: choice
+      options:
+        - univariate
+        #- multivariate
+        
+    model_params.matching:
+      type: choice
+      options:
+        - random
+
+    model_params.use_ema:
+      type: choice
+      options:
+        #- False
+        - True
+
+    model_params.use_lags:
+      type: choice
+      options: 
+        #- False
+        - True
+    
+
+    seed:
+      type: choice
+      options:
+        - 6432
+        - 6433
+        - 6434
+        - 6435
+        - 6436
+
+
+periodic_kernel:
+  fixed:
+    model_params.prior_params:
+      kernel: pe
+      gamma: 1.
+      context_freqs: 7
+
+rbf_kernel:
+  fixed:
+    model_params.prior_params:
+      kernel: se
+      gamma: 1.
+      context_freqs: 7
+
+ernstein_kernel:
+  fixed: 
+    model_params.prior_params:
+      kernel: ou
+      gamma: 1.
+      context_freqs: 7
+
+random_prior:
+  fixed:
+    model_params.prior_params:
+      kernel: iso
+      gamma: 1.0
+      context_freqs: 1
+

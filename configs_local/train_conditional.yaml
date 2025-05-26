@@ -1,0 +1,61 @@
+model: conditional
+setting: univariate
+model_params:
+  backbone_params:
+    input_dim: 1
+    output_dim: 1
+    step_emb: 64
+    num_residual_blocks: 3
+    residual_block: s4
+    hidden_dim: 64
+    dropout: 0.0
+    init_skip: False
+    feature_skip: True
+
+  freq: H
+  normalization: longmean
+  context_length: 24 # 360 for `D`
+  prediction_length: 24 # 30 for `D`
+ 
+  use_ema: True
+  use_lags: True
+  
+  num_steps: 32
+  solver: euler
+  matching: random
+
+  device: cuda:0
+  
+  optimizer_params: 
+    lr: 1.e-3
+
+  prior_params:
+    kernel: ou
+    gamma: 1
+    context_freqs: 14
+
+  ema_params: 
+    beta: 0.9999
+    update_after_step: 128
+    update_every: 1
+
+
+dataset_params:
+  dataset: electricity_nips
+  num_batches_per_epoch: 128
+  batch_size: 64
+
+trainer_params:
+  gradient_clip_val: .5
+  max_epochs: 400
+  num_sanity_val_steps: 0
+
+# Used only in callback,
+# the final evaluation uses 100 samples
+evaluation_params:
+  num_samples: 16
+  use_validation_set: True
+  eval_every: 20
+  do_final_eval: True
+
+seed: 6432

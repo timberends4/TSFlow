@@ -1,0 +1,20 @@
+model: ps
+
+model_params:
+  freq: 1D
+  normalization: mean
+  context_length: 210 # 360 for `D`
+  prediction_length: 30 # 30 for `D`
+  matching: ot
+
+  iterations: 4
+  alpha: 0.005
+  noise_level: 0.5
+  guidance_scale: 4
+
+dataset_params:
+  dataset: wiki2000_nips
+  num_batches_per_epoch: 128
+  batch_size: 64
+  
+seed: 6432
