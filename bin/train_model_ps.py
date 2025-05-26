@@ -127,6 +127,8 @@ def main(
     config=None,
     loggers=[],
 ):
+    if logdir:
+        Path(logdir).mkdir(parents=True, exist_ok=True)
     pl.seed_everything(seed)
     # Load parameters
     dataset_name = dataset_params["dataset"]
@@ -269,4 +271,6 @@ if __name__ == "__main__":
     config.update(config_updates)
     aim_logger = AimLogger()
     aim_logger.log_hyperparams(config)
+    aim_logger.log_hyperparams(config)
+    config["logdir"] = args.logdir + "/" + aim_logger.version
     main(**config, loggers=[aim_logger])
