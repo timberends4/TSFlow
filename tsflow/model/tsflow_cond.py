@@ -10,7 +10,7 @@ from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
 
 from tsflow.arch import BackboneModel
-from tsflow.arch.backbones import BackboneModelMultivariate
+# from tsflow.arch.backbones import BackboneModelMultivariate
 from tsflow.model._base import PREDICTION_INPUT_NAMES, TSFlowBase
 from tsflow.utils.gaussian_process import Q0Dist
 from tsflow.utils.util import LongScaler
