@@ -1,5 +1,6 @@
 import argparse
 import logging
+import sys
 import tempfile
 from pathlib import Path
 
@@ -9,33 +10,31 @@ import pytorch_lightning as pl
 import torch
 import yaml
 from aim.pytorch_lightning import AimLogger
+from aim import Text
+
 from gluonts.dataset.loader import TrainDataLoader
 from gluonts.dataset.multivariate_grouper import MultivariateGrouper
 from gluonts.dataset.split import OffsetSplitter
-from gluonts.evaluation import (
-    Evaluator,
-    MultivariateEvaluator,
-    make_evaluation_predictions,
-)
+from gluonts.evaluation import Evaluator, MultivariateEvaluator, make_evaluation_predictions
 from gluonts.itertools import Cached
 from gluonts.time_feature import time_features_from_frequency_str
 from gluonts.torch.batchify import batchify
 from pytorch_lightning.callbacks import ModelCheckpoint
 from tqdm.auto import tqdm
-
 from tsflow.callback import EvaluateCallback
 from tsflow.dataset import get_gts_dataset
 from tsflow.model import TSFlowCond
-from tsflow.utils import (
-    create_multivariate_transforms,
-    create_transforms,
-)
+from tsflow.utils import create_multivariate_transforms, create_transforms
 from tsflow.utils.util import ConcatDataset, add_config_to_argparser, create_splitter, filter_metrics
 from tsflow.utils.variables import get_season_length
 
+# PyKeOps build folder
 temp_build_folder = tempfile.mkdtemp(prefix="pykeops_build_")
 pykeops.set_build_folder(temp_build_folder)
 pykeops.clean_pykeops()
+
+# Use Tensor Cores
+torch.set_float32_matmul_precision('medium')
 
 
 def create_model(setting, target_dim, model_params):
@@ -66,9 +65,10 @@ def evaluate_conditional(
     test_dataset,
     transformation,
     trainer,
+    info,
     num_samples=100,
 ):
-    logging.info(f"Evaluating with {num_samples} samples.")
+    info(f"Evaluating with {num_samples} samples.")
     results = {}
 
     transformed_testdata = transformation.apply(test_dataset, is_train=False)
@@ -81,15 +81,15 @@ def evaluate_conditional(
         mode="test",
     )
 
-    test_transform = test_splitter
     if model.setting == "univariate":
         batch_size = 1024 * 64 // num_samples
         evaluator = Evaluator(num_workers=1)
-    elif model.setting == "multivariate":
+    else:
         batch_size = 1
         evaluator = MultivariateEvaluator(target_agg_funcs={"sum": np.sum})
+
     predictor = model.get_predictor(
-        test_transform,
+        test_splitter,
         batch_size=batch_size,
         device=model_params["device"],
     )
@@ -105,16 +105,16 @@ def evaluate_conditional(
     select = ["CRPS", "ND", "NRMSE"]
     if model.setting == "multivariate":
         metrics["m_sum_CRPS"] = metrics["m_sum_mean_wQuantileLoss"]
-        select = select + ["m_sum_CRPS"]
+        select.append("m_sum_CRPS")
     metrics = filter_metrics(metrics, select)
-    [
-        logger.log_metrics(
-            {f"test_{key}": val for key, val in metrics.items()},
+
+    for lg in trainer.loggers:
+        lg.log_metrics(
+            {f"test_{k}": v for k, v in metrics.items()},
             step=trainer.global_step + 1,
         )
-        for logger in trainer.loggers
-    ]
-    results["test"] = dict(**metrics)
+
+    results["test"] = dict(metrics)
     return results
 
 
@@ -125,6 +125,7 @@ def main(
     dataset_params,
     trainer_params,
     evaluation_params,
+    info,
     logdir=None,
     seed=None,
     config=None,
@@ -133,32 +134,40 @@ def main(
     if logdir:
         Path(logdir).mkdir(parents=True, exist_ok=True)
     pl.seed_everything(seed)
-    # Load parameters
+
+    # Load dataset
     dataset_name = dataset_params["dataset"]
     freq = model_params["freq"]
     prediction_length = model_params["prediction_length"]
 
     dataset = get_gts_dataset(dataset_name)
     target_dim = min(2000, int(dataset.metadata.feat_static_cat[0].cardinality))
-    # Create model
+
+    # Log dataset info
+    info(f"Dataset {dataset_name} has target dimension: {target_dim}")
+
+    # Build model
     model = create_model(setting, target_dim, model_params)
 
-    # Setup dataset and data loading
+    # Sanity checks
     assert dataset.metadata.freq == freq
     assert dataset.metadata.prediction_length == prediction_length
 
-    num_rolling_evals = int(len(dataset.test) / len(dataset.train))
+    # Figure out rolling eval count
+    num_rolling_evals = len(dataset.test) // len(dataset.train)
     time_features = time_features_from_frequency_str(freq)
+
+    # Prepare transforms & data
     if setting == "univariate":
         transformation = create_transforms(
             time_features=time_features,
-            prediction_length=model_params["prediction_length"],
+            prediction_length=prediction_length,
             freq=get_season_length(freq),
             train_length=len(dataset.train),
         )
         training_data = dataset.train
         test_data = dataset.test
-    elif setting == "multivariate":
+    else:
         train_grouper = MultivariateGrouper(max_target_dim=target_dim)
         test_grouper = MultivariateGrouper(
             num_test_dates=num_rolling_evals,
@@ -166,7 +175,7 @@ def main(
         )
         transformation = create_multivariate_transforms(
             time_features=time_features,
-            prediction_length=model_params["prediction_length"],
+            prediction_length=prediction_length,
             target_dim=target_dim,
             freq=get_season_length(freq),
             train_length=len(dataset.train),
@@ -174,37 +183,43 @@ def main(
         training_data = train_grouper(dataset.train)
         test_data = test_grouper(dataset.test)
 
+    # Instance splitter for training
     training_splitter = create_splitter(
         past_length=max(
             model_params["context_length"] + max(model.lags_seq),
             model.prior_context_length,
         ),
-        future_length=model_params["prediction_length"],
+        future_length=prediction_length,
         mode="train",
     )
+
     callbacks = []
-    if evaluation_params["use_validation_set"]:
-        train_val_splitter = OffsetSplitter(offset=-model_params["prediction_length"] * num_rolling_evals)
+
+    # Optional validation set
+    if evaluation_params.get("use_validation_set", False):
+        offset = - prediction_length * num_rolling_evals
+        train_val_splitter = OffsetSplitter(offset=offset)
         training_data, val_gen = train_val_splitter.split(training_data)
+
         transformed_data = transformation.apply(training_data, is_train=True)
-        val_data = val_gen.generate_instances(model_params["prediction_length"], num_rolling_evals)
+
+        val_data = val_gen.generate_instances(prediction_length, num_rolling_evals)
         transformed_valdata = transformation.apply(ConcatDataset(val_data), is_train=False)
-        callbacks = [
+
+        callbacks.append(
             EvaluateCallback(
                 context_length=model_params["context_length"],
-                prediction_length=model_params["prediction_length"],
+                prediction_length=prediction_length,
                 model=model,
                 datasets={"val": transformed_valdata},
                 logdir=logdir,
                 **evaluation_params,
             )
-        ]
+        )
     else:
         transformed_data = transformation.apply(training_data, is_train=True)
 
-    log_monitor = "train_loss"
-    filename = dataset_name + "-{epoch:03d}-{train_loss:.3f}"
-
+    # Training DataLoader
     data_loader = TrainDataLoader(
         Cached(transformed_data),
         batch_size=dataset_params["batch_size"],
@@ -214,16 +229,18 @@ def main(
         shuffle_buffer_length=10000,
     )
 
+    # Checkpoint callback
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
-        monitor=f"{log_monitor}",
+        monitor="train_loss",
         mode="min",
-        filename=filename,
+        filename=f"{dataset_name}-{{epoch:03d}}-{{train_loss:.3f}}",
         save_last=True,
         save_weights_only=True,
     )
-
     callbacks.append(checkpoint_callback)
+
+    # Trainer
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else None,
         devices=[int(model_params["device"].split(":")[-1])],
@@ -234,62 +251,89 @@ def main(
         **trainer_params,
     )
 
-    logging.info(f"Logging to {logdir}")
+    info(f"Logging to {logdir}")
     trainer.fit(model, train_dataloaders=data_loader)
-    logging.info("Training completed.")
+    info("Training completed.")
 
-    best_ckpt_path = Path(logdir) / "best_checkpoint.ckpt"
-    if not best_ckpt_path.exists():
+    # Load best checkpoint
+    best_ckpt = Path(logdir) / "best_checkpoint.ckpt"
+    if not best_ckpt.exists():
         torch.save(
             torch.load(checkpoint_callback.best_model_path)["state_dict"],
-            best_ckpt_path,
+            best_ckpt,
         )
-    logging.info(f"Loading {best_ckpt_path}.")
-    best_state_dict = torch.load(best_ckpt_path)
-    model.load_state_dict(best_state_dict, strict=True)
+    info(f"Loading checkpoint from {best_ckpt}")
+    best_state = torch.load(best_ckpt)
+    model.load_state_dict(best_state, strict=True)
 
-    metrics = (
-        evaluate_conditional(model_params, model, test_data, transformation, trainer)
-        if evaluation_params.get("do_final_eval", True)
-        else "Final eval not performed"
-    )
+    # Final evaluation
+    if evaluation_params.get("do_final_eval", True):
+        metrics = evaluate_conditional(
+            model_params, model, test_data, transformation, trainer, info
+        )
+    else:
+        metrics = "Final eval not performed"
 
+    # Dump results
     with open(Path(logdir) / "results.yaml", "w") as fp:
-        yaml.dump(
-            {
-                "config": config,
-                "version": trainer.logger.version,
-                "metrics": metrics,
-            },
-            fp,
-        )
+        yaml.dump({
+            "config": config,
+            "version": trainer.logger.version,
+            "metrics": metrics,
+        }, fp)
+
     return metrics
 
 
 if __name__ == "__main__":
-    # Setup Logger
-    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    # Configure root logger to stdout
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
 
-    # Setup argparse
+    # Arg parsing
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--config", type=str, required=True, help="Path to yaml config")
-    parser.add_argument("--logdir", type=str, default="./logs", help="Path to results dir")
+    parser.add_argument("-c", "--config", type=str, required=True,
+                        help="Path to yaml config")
+    parser.add_argument("--logdir", type=str, default="./logs",
+                        help="Path to results dir")
     args, _ = parser.parse_known_args()
 
     with open(args.config, "r") as fp:
         config = yaml.safe_load(fp)
 
-    # Update config from command line
     parser = add_config_to_argparser(config=config, parser=parser)
     args = parser.parse_args()
-    config_updates = vars(args)
-    for k in config.keys() & config_updates.keys():
-        orig_val = config[k]
-        updated_val = config_updates[k]
-        if updated_val != orig_val:
-            logging.info(f"Updated key '{k}': {orig_val} -> {updated_val}")
-    config.update(config_updates)
-    aim_logger = AimLogger()
+    updates = vars(args)
+    for k in config.keys() & updates.keys():
+        if updates[k] != config[k]:
+            logging.info(f"Updating config '{k}': {config[k]} -> {updates[k]}")
+    config.update(updates)
+
+    # AimLogger setup
+    aim_logger = AimLogger(repo="./.aim")
     aim_logger.log_hyperparams(config)
-    config["logdir"] = args.logdir + "/" + aim_logger.version
-    main(**config, loggers=[aim_logger])
+    config["logdir"] = f"{args.logdir}/{aim_logger.version}"
+
+    # Grab Aim run and define info()
+    run = aim_logger.experiment
+    def info(msg: str):
+        logging.info(msg)
+        run.track(Text(msg), name="info")  # <- sends your text into Aim
+
+    # Run training + evaluation
+    main(
+        model=config["model"],
+        setting=config["setting"],
+        model_params=config["model_params"],
+        dataset_params=config["dataset_params"],
+        trainer_params=config["trainer_params"],
+        evaluation_params=config["evaluation_params"],
+        info=info,
+        logdir=config["logdir"],
+        seed=config.get("seed"),
+        config=config,
+        loggers=[aim_logger],
+    )

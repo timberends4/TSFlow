@@ -62,11 +62,16 @@ class TSFlowCond(TSFlowBase):
                 target_dim=target_dim,
             )
         else:
-            self.backbone = BackboneModelMultivariate(
+            self.backbone = BackboneModel(
                 **backbone_params,
                 num_features=num_features,
                 target_dim=target_dim,
             )
+            # self.backbone = BackboneModelMultivariate(
+            #     **backbone_params,
+            #     num_features=num_features,
+            #     target_dim=target_dim,
+            # )
         self.ema_backbone = EMA(self.backbone, **ema_params)
         self.setting = setting
         self.guidance_scale = 0

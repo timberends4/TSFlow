@@ -1,5 +1,5 @@
 model: conditional
-setting: univariate
+setting: multivariate
 model_params:
   backbone_params:
     input_dim: 1
@@ -43,7 +43,7 @@ model_params:
 dataset_params:
   dataset: electricity_nips
   num_batches_per_epoch: 128
-  batch_size: 64
+  batch_size: 1
 
 trainer_params:
   gradient_clip_val: .5

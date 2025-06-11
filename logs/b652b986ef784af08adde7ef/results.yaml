@@ -1,0 +1,8 @@
+config: configs_local/train_conditional.yaml
+metrics:
+  test:
+    CRPS: 0.043007072880921336
+    ND: 0.05342289505271539
+    NRMSE: 0.4494036509782281
+    m_sum_CRPS: 0.018009075885789896
+version: b652b986ef784af08adde7ef
