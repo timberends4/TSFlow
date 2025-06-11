@@ -9,12 +9,12 @@ from torchdyn.core import NeuralODE
 from torchtyping import TensorType
 from typeguard import typechecked
 
-from tsflow.utils.gaussian_process import Q0Dist
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
 from tsflow.utils.optimal_transport import OTPlanSampler
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, get_lags_for_freq, get_season_length
 
-PREDICTION_INPUT_NAMES = ["past_target", "past_observed_values", "mean"]
+PREDICTION_INPUT_NAMES = ["past_target", "past_observed_values", "mean", "id"]
 
 
 class TSFlowBase(pl.LightningModule):
@@ -32,6 +32,8 @@ class TSFlowBase(pl.LightningModule):
         num_steps: int = 16,
         sigm: float = 0.001,
         solver: str = "euler",
+        info = None,
+        target_dim = 0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -63,15 +65,19 @@ class TSFlowBase(pl.LightningModule):
         self.use_ema = use_ema
         self.num_steps = num_steps
         self.solver = solver
+        self.info = info
         self.num_samples = 1
         self.times = []
         self.sigmin = sigm
         self.sigmax = 1 if self.prior != Prior.ISO else self.sigmin
-        self.q0 = Q0Dist(
+        self.target_dim = target_dim
+        self.q0 = Q0DistMultiTask(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
             iso=1e-2 if self.prior != Prior.ISO else 0,
+            info = self.info,
+            num_tasks = self.target_dim
         )
 
     def _extract_features(self, data):

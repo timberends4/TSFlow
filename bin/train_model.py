@@ -54,6 +54,7 @@ def create_model(setting, target_dim, model_params):
         num_steps=model_params["num_steps"],
         solver=model_params["solver"],
         matching=model_params["matching"],
+        info = info
     )
     model.to(model_params["device"])
     return model
@@ -146,6 +147,7 @@ def main(
     # Log dataset info
     info(f"Dataset {dataset_name} has target dimension: {target_dim}")
 
+    model_params['info'] = info
     # Build model
     model = create_model(setting, target_dim, model_params)
 

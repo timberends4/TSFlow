@@ -8,11 +8,12 @@ from gluonts.torch.util import lagged_sequence_values
 from gluonts.transform.split import InstanceSplitter
 from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
+from typing import Union, List
 
 from tsflow.arch import BackboneModel
 # from tsflow.arch.backbones import BackboneModelMultivariate
 from tsflow.model._base import PREDICTION_INPUT_NAMES, TSFlowBase
-from tsflow.utils.gaussian_process import Q0Dist
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, Setting
 
@@ -37,6 +38,8 @@ class TSFlowCond(TSFlowBase):
         num_steps: int = 16,
         solver: str = "euler",
         matching: str = "random",
+        info = None,
+
     ):
         super().__init__(
             context_length=context_length,
@@ -50,6 +53,7 @@ class TSFlowCond(TSFlowBase):
             num_steps=num_steps,
             solver=solver,
             matching=matching,
+            info=info
         )
         num_features = 2 + (len(self.lags_seq) if use_lags else 0)
 
@@ -76,11 +80,13 @@ class TSFlowCond(TSFlowBase):
         self.setting = setting
         self.guidance_scale = 0
         self.sigmax = self.sigmin
-        self.q0 = Q0Dist(
+        self.q0 = Q0DistMultiTask(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
             iso=1e-1 if self.prior != Prior.ISO else 0,
+            info = info,
+            num_tasks = target_dim
         )
 
     @typechecked
@@ -98,7 +104,8 @@ class TSFlowCond(TSFlowBase):
         future = data["future_target"]
         context_observed = data["past_observed_values"]
         mean = data["mean"]
-        # id = data["id"]
+        ids = data["id"]
+
         if self.setting == Setting.UNIVARIATE:
             past = rearrange(past, "... -> ... 1")
             future = rearrange(future, "... -> ... 1")
@@ -134,7 +141,7 @@ class TSFlowCond(TSFlowBase):
             )
             features.append(lags)
 
-        dist = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
+        dist = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), ids, self.prediction_length)
 
         fut = rearrange(dist.sample(), "(b c) l -> b l c", c=c)
         fut_mean = rearrange(dist.mean, "(b c) l -> b l c", c=c)
@@ -169,6 +176,8 @@ class TSFlowCond(TSFlowBase):
         past_target: TensorType[float, "batch", "length"] | TensorType[float, "batch", "length", "num_series"],
         past_observed_values: TensorType[float, "batch", "length"] | TensorType[float, "batch", "length", "num_series"],
         mean: TensorType[float, "batch", 1] | TensorType[float, "batch", 1, "num_series"] = None,
+        id = None,
+
     ) -> (
         TensorType[float, "batch", "num_samples", "prediction_length"]
         | TensorType[float, "batch", "num_samples", "prediction_length", "num_series"]
@@ -183,6 +192,7 @@ class TSFlowCond(TSFlowBase):
             past_observed_values=past_observed_values,
             mean=mean,
             future_target=future_target,
+            id = id
         )
         observation, x0, observation_mask, loc, scale, features = self._extract_features(data)
         x0 = x0 + self.sigmax * torch.randn_like(x0)

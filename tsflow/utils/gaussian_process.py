@@ -51,6 +51,125 @@ def get_gp(kernel: Prior, gamma: TensorType[float], length: int, freq: int) -> T
     cov = kernel_function_map[kernel](gamma, t, t.unsqueeze(1))
     return cov
 
+class Q0DistMultiTask(torch.nn.Module):
+    def __init__(
+        self,
+        kernel: Prior,
+        context_freqs: int,
+        prediction_length: int,
+        num_tasks: int,
+        freq: int = 24,
+        gamma: float = 1.0,
+        iso: float = 1e-4,
+        info=None,
+    ):
+        super().__init__()
+        self.info = info
+
+        # 1) dimensions
+        self.context_length = context_freqs * prediction_length
+        T = self.context_length + prediction_length
+        self.prediction_length = prediction_length
+        self.num_tasks = num_tasks
+
+        # 2) build time-only GP in float32
+        t = torch.arange(T, dtype=torch.float32) * (torch.pi / freq)
+        gamma_f = torch.tensor(gamma, dtype=torch.float32)
+        cov_time = (
+            kernel_function_map[kernel](gamma_f, t, t.unsqueeze(1))
+            + iso * torch.eye(T, dtype=torch.float32)
+        )
+
+        # split obs vs new
+        obs_mask = torch.arange(T) < self.context_length
+        K     = cov_time[obs_mask][:, obs_mask]      # [T_obs, T_obs]
+        K_star = cov_time[obs_mask][:, ~obs_mask]    # [T_obs, T_new]
+        K_ss   = cov_time[~obs_mask][:, ~obs_mask]   # [T_new, T_new]
+
+        # invert with jitter
+        K = K + 1e-4 * torch.eye(K.size(0), dtype=torch.float32)
+        K_inv = torch.linalg.inv(K)
+
+        # regression & predictive-covariance
+        K_inv_x_K_star = (K_inv @ K_star)            # [T_obs, T_new]
+        cov_reg        = (K_ss - K_star.T @ K_inv_x_K_star)  # [T_new, T_new]
+
+        # register buffers
+        self.register_buffer("K_inv_x_K_star", K_inv_x_K_star, persistent=False)
+        self.register_buffer("cov_reg",        cov_reg,        persistent=False)
+        self.register_buffer("K_time",        cov_time,       persistent=False)
+
+        # 3) multitask coregionalization factor
+        self.L = torch.nn.Parameter(torch.eye(num_tasks, dtype=torch.float32) * 0.1)
+
+        if self.info:
+            self.info(f"[Q0MT] T={T}, tasks={num_tasks}, cov_reg={tuple(cov_reg.shape)}")
+
+    def forward(self, ids: torch.LongTensor, num_samples: int) -> torch.Tensor:
+        device = self.K_time.device
+        ids = ids.to(device).flatten()
+        S = ids.size(0)
+        T = self.K_time.size(0)
+
+        B = self.L @ self.L.T                  # [num_tasks, num_tasks]
+        B_b = B[ids][:, ids]                   # [S, S]
+        K_big = torch.kron(B_b, self.K_time)   # [S*T, S*T]
+
+        dist = MV(
+            loc=torch.zeros(S * T, device=device),
+            covariance_matrix=K_big + 1e-6 * torch.eye(S*T, device=device)  # jitter
+        )
+        # return full samples
+        samples = dist.sample((num_samples,))  # [num_samples, S*T]
+        return samples.view(num_samples, S, T)
+
+    def gp_regression(self, x: torch.Tensor, ids, pred_len: int):
+        """
+        Returns a tiny wrapper over a MultivariateNormal whose .sample()
+        returns a 2D tensor of shape [S_flat, T_new], so downstream
+        rearrange("(b c) l -> b l c", c=c) works unmodified.
+        """
+        device = x.device
+        ids = torch.as_tensor(ids, dtype=torch.long, device=device).flatten()
+
+        S_flat, T_obs = x.shape
+        T_new = self.prediction_length
+        assert pred_len == T_new
+
+        # expand ids to flattened series (batch_size * channels)
+        reps = S_flat // ids.numel()
+        ids_flat = ids.repeat_interleave(reps)      # [S_flat]
+
+        # build B_b
+        B = self.L @ self.L.T                       # [num_tasks, num_tasks]
+        B_b = B[ids_flat][:, ids_flat]              # [S_flat, S_flat]
+
+        # posterior mean
+        mean_mat = x @ self.K_inv_x_K_star          # [S_flat, T_new]
+        mean     = mean_mat.reshape(-1)             # [S_flat * T_new]
+
+        # posterior covariance with jitter
+        cov = torch.kron(B_b, self.cov_reg)
+        cov = cov + 1e-6 * torch.eye(cov.size(0), device=device)
+
+        base_dist = MV(loc=mean, covariance_matrix=cov)
+
+        # proxy that reshapes sample() automatically
+        class _Dist2D:
+            def __init__(self, mv, S, L):
+                self.mv = mv
+                self.mean = mv.mean.view(S, L)
+                self.covariance_matrix = mv.covariance_matrix
+                self.S, self.L = S, L
+            def sample(self):
+                flat = self.mv.sample()        # [S*L]
+                return flat.view(self.S, self.L)
+            def rsample(self):
+                flat = self.mv.rsample()
+                return flat.view(self.S, self.L)
+
+        return _Dist2D(base_dist, S_flat, T_new)
+
 
 class Q0Dist(torch.nn.Module):
     def __init__(
@@ -61,6 +180,7 @@ class Q0Dist(torch.nn.Module):
         freq: int = 24,
         gamma: float = 1.0,
         iso: float = 1e-4,
+        info = None
     ):
         """
         Initialize the GP distribution.
@@ -74,6 +194,7 @@ class Q0Dist(torch.nn.Module):
             iso (float, optional): The isotropic noise level. Defaults to 1e-4.
         """
         super().__init__()
+        self.info = info
         context_length = context_freqs * prediction_length
         window_length = context_length + prediction_length
 
@@ -107,6 +228,12 @@ class Q0Dist(torch.nn.Module):
         self.register_buffer("cov_reg", cov_reg.float(), persistent=False)
 
         self.dist = MV(loc=mean.float(), covariance_matrix=cov.float())
+
+        if self.info:
+            self.info(f"[Q0Dist] kernel={kernel}, γ={gamma}, window={context_freqs*prediction_length + prediction_length}")
+        # … build cov, K_inv, etc. …
+        if self.info:
+            self.info(f"[Q0Dist] cov built, shape={cov.shape}")
 
     def _apply(self, fn):
         """
