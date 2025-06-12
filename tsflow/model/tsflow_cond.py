@@ -176,8 +176,7 @@ class TSFlowCond(TSFlowBase):
         past_target: TensorType[float, "batch", "length"] | TensorType[float, "batch", "length", "num_series"],
         past_observed_values: TensorType[float, "batch", "length"] | TensorType[float, "batch", "length", "num_series"],
         mean: TensorType[float, "batch", 1] | TensorType[float, "batch", 1, "num_series"] = None,
-        id = None,
-
+        id: Union[List[int], torch.Tensor, None, list] = None,
     ) -> (
         TensorType[float, "batch", "num_samples", "prediction_length"]
         | TensorType[float, "batch", "num_samples", "prediction_length", "num_series"]

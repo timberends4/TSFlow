@@ -70,6 +70,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/gluonts-0.14.4-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gmp-6.3.0-hac33072_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gmpy2-2.1.5-py312h7201bc8_3.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/gpytorch-1.14-pyh101cb37_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/greenlet-3.2.2-py312h2ec8cdc_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/h11-0.14.0-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/h2-4.2.0-pyhd8ed1ab_0.conda
@@ -86,6 +87,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/ipython-8.32.0-pyh907856f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ipywidgets-8.1.5-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/isoduration-20.11.0-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/jaxtyping-0.3.2-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jedi-0.19.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jinja2-3.1.5-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jmespath-1.0.1-pyhd8ed1ab_1.conda
@@ -151,6 +153,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libzlib-1.3.1-hb9d3cd8_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/lightning-2.5.0.post0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/lightning-utilities-0.12.0-pyhd8ed1ab_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/linear_operator-0.6-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/llvm-openmp-19.1.7-h024ca30_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/lz4-c-1.9.4-hcb278e6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mako-1.3.10-pyhd8ed1ab_0.conda
@@ -270,6 +273,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/uvicorn-0.34.3-pyh31011fe_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/uvicorn-standard-0.34.3-h31011fe_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/uvloop-0.21.0-py312h66e93f0_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/wadler-lindig-0.1.5-pyh29332c3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/watchfiles-1.0.5-py312h12e396e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/wcwidth-0.2.13-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/webcolors-24.11.1-pyhd8ed1ab_0.conda
@@ -389,6 +393,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/gluonts-0.14.4-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gmp-6.3.0-hac33072_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gmpy2-2.1.5-py312h7201bc8_3.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/gpytorch-1.14-pyh101cb37_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/greenlet-3.2.2-py312h2ec8cdc_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/h11-0.14.0-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/h2-4.2.0-pyhd8ed1ab_0.conda
@@ -405,6 +410,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/ipython-8.32.0-pyh907856f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ipywidgets-8.1.5-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/isoduration-20.11.0-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/jaxtyping-0.3.2-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jedi-0.19.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jinja2-3.1.5-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/jmespath-1.0.1-pyhd8ed1ab_1.conda
@@ -480,6 +486,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libzlib-1.3.1-hb9d3cd8_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/lightning-2.5.0.post0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/lightning-utilities-0.12.0-pyhd8ed1ab_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/linear_operator-0.6-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/llvm-openmp-19.1.7-h024ca30_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/lz4-c-1.9.4-hcb278e6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mako-1.3.10-pyhd8ed1ab_0.conda
@@ -599,6 +606,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/uvicorn-0.34.3-pyh31011fe_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/uvicorn-standard-0.34.3-h31011fe_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/uvloop-0.21.0-py312h66e93f0_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/wadler-lindig-0.1.5-pyh29332c3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/watchfiles-1.0.5-py312h12e396e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/wcwidth-0.2.13-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/webcolors-24.11.1-pyhd8ed1ab_0.conda
@@ -1636,6 +1644,23 @@ packages:
   - pkg:pypi/gmpy2?source=hash-mapping
   size: 209631
   timestamp: 1733462668219
+- conda: https://conda.anaconda.org/conda-forge/noarch/gpytorch-1.14-pyh101cb37_0.conda
+  sha256: e3ad4354684c7f3389072bf123038e2050debb87cd236e3f4e25456a2ce3a5d0
+  md5: 42a8bd8547c04d0d88bfd4107360fca3
+  depends:
+  - jaxtyping
+  - linear_operator >=0.6
+  - mpmath >=0.19,<=1.3
+  - python >=3.10
+  - pytorch >=2.0
+  - scikit-learn
+  - scipy >=1.6.0
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/gpytorch?source=hash-mapping
+  size: 168622
+  timestamp: 1738527943712
 - conda: https://conda.anaconda.org/conda-forge/linux-64/greenlet-3.2.2-py312h2ec8cdc_0.conda
   sha256: df5365f7ea6ab7650de17a762341bdfed9a68717f9ac01839337ff56a37dfd01
   md5: 57479f460e512017f9e94299fabac297
@@ -1879,6 +1904,18 @@ packages:
   - pkg:pypi/isoduration?source=hash-mapping
   size: 19832
   timestamp: 1733493720346
+- conda: https://conda.anaconda.org/conda-forge/noarch/jaxtyping-0.3.2-pyhd8ed1ab_0.conda
+  sha256: c8f51056484f23a8a2a47540155095d099983ff8bc03a9b064effa9c8157cf5c
+  md5: 4a3e5a04f0d9ee0d00a1cdd686e5c60f
+  depends:
+  - python >=3.10
+  - wadler-lindig >=0.1.3
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/jaxtyping?source=hash-mapping
+  size: 47541
+  timestamp: 1747196575946
 - conda: https://conda.anaconda.org/conda-forge/noarch/jedi-0.19.2-pyhd8ed1ab_1.conda
   sha256: 92c4d217e2dc68983f724aa983cca5464dcb929c566627b26a2511159667dba8
   md5: a4f4c5dc9b80bc50e0d3dc4e6e8f1bd9
@@ -2965,6 +3002,21 @@ packages:
   - local-attention
   - product-key-memory>=0.1.5
   - torch
+- conda: https://conda.anaconda.org/conda-forge/noarch/linear_operator-0.6-pyhd8ed1ab_0.conda
+  sha256: 81f39a60153e9397e1d83b6c39a97698556721fe860db7fee3030b1089be15e0
+  md5: 702003425bcf9cb55d6647d21513d4b4
+  depends:
+  - jaxtyping
+  - mpmath >=0.19,<=1.3
+  - python >=3.10
+  - pytorch >=2.0
+  - scipy
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/linear-operator?source=hash-mapping
+  size: 117336
+  timestamp: 1738340125252
 - pypi: https://files.pythonhosted.org/packages/43/d0/72ebb12edbfd28ae8e9838db10dd6e5a1ecfa1958bcf769e8f2e1df4698e/linformer-0.2.3-py3-none-any.whl
   name: linformer
   version: 0.2.3
@@ -4660,7 +4712,7 @@ packages:
 - pypi: ./
   name: tsflow
   version: 0.1.0
-  sha256: d7da0f8b5d5d2767b8b8aacfc25d7b87ff510180e646bb935196d20c7f46448e
+  sha256: 11e88208107f6a7b8d0e8964a6ba8c073a25d22fe45b292ff140ae7364f67b95
   requires_dist:
   - pykeops==2.1.1
   - torchtyping==0.1.5
@@ -4858,6 +4910,18 @@ packages:
   - pkg:pypi/uvloop?source=hash-mapping
   size: 701355
   timestamp: 1730214506716
+- conda: https://conda.anaconda.org/conda-forge/noarch/wadler-lindig-0.1.5-pyh29332c3_0.conda
+  sha256: c79787674fd49820a9b01453a2cbef0726fff14bb8154dbd33d44911eec13999
+  md5: 2c4e0dd8f3f468f24684a3e6e394efa0
+  depends:
+  - python >=3.10
+  - python
+  license: Apache-2.0
+  license_family: APACHE
+  purls:
+  - pkg:pypi/wadler-lindig?source=hash-mapping
+  size: 27475
+  timestamp: 1744605034911
 - conda: https://conda.anaconda.org/conda-forge/linux-64/watchfiles-1.0.5-py312h12e396e_0.conda
   sha256: b97b961190e2f0d4bc4e26d6a58cce847aa353a292f1fec194e9ecca25793101
   md5: 731f9ed51e7198ec91c4b9d7899e881c

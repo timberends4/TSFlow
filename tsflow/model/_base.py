@@ -190,8 +190,9 @@ class TSFlowBase(pl.LightningModule):
         self,
         num_samples: int,
         features: TensorType[float, "batch", "length", "num_features"] | None = None,
+        ids = None
     ) -> TensorType[float, "batch", "length", 1]:
-        noise = self.q0(num_samples).to(self.device).unsqueeze(-1)
+        noise = self.q0(ids, num_samples).to(self.device).unsqueeze(-1)
         noise = noise + self.sigmax * torch.randn_like(noise)
         return self.sample(noise, features).cpu() + 1
 
