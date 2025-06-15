@@ -248,7 +248,7 @@ def main(
         devices=[int(model_params["device"].split(":")[-1])],
         default_root_dir=logdir,
         logger=loggers,
-        enable_progress_bar=False,
+        enable_progress_bar=True,
         callbacks=callbacks,
         **trainer_params,
     )

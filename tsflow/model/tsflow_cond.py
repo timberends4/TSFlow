@@ -56,7 +56,7 @@ class TSFlowCond(TSFlowBase):
             info=info
         )
         num_features = 2 + (len(self.lags_seq) if use_lags else 0)
-
+        self.info = info
         target_dim = target_dim if setting == Setting.MULTIVARIATE else 1
 
         if setting == Setting.UNIVARIATE:
@@ -84,75 +84,85 @@ class TSFlowCond(TSFlowBase):
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
-            iso=1e-1 if self.prior != Prior.ISO else 0,
+            # iso=1e-1 if self.prior != Prior.ISO else 0,
             info = info,
             num_tasks = target_dim
         )
+        self.num_tasks = target_dim
 
     @typechecked
     def _extract_features(
-        self, data: dict
-    ) -> Tuple[
-        TensorType[float, "batch", "length", "num_series"],
-        TensorType[float, "batch", "length", "num_series"],
-        TensorType[float, "batch", "length", "num_series"],
-        TensorType[float, "batch", 1, "num_series"],
-        TensorType[float, "batch", 1, "num_series"],
-        TensorType[float, "batch", "length", "num_series", "num_features"],
-    ]:
-        past = data["past_target"]
-        future = data["future_target"]
-        context_observed = data["past_observed_values"]
-        mean = data["mean"]
-        ids = data["id"]
+            self, data: dict
+        ) -> Tuple[
+            TensorType[float, "batch", "length", "num_series"],
+            TensorType[float, "batch", "length", "num_series"],
+            TensorType[float, "batch", "length", "num_series"],
+            TensorType[float, "batch", 1, "num_series"],
+            TensorType[float, "batch", 1, "num_series"],
+            TensorType[float, "batch", "length", "num_series", "num_features"],
+        ]:
+            past = data["past_target"]
+            future = data["future_target"]
+            context_observed = data["past_observed_values"]
+            mean = data["mean"]
 
-        if self.setting == Setting.UNIVARIATE:
-            past = rearrange(past, "... -> ... 1")
-            future = rearrange(future, "... -> ... 1")
-            context_observed = rearrange(context_observed, "... -> ... 1")
-            mean = rearrange(data["mean"], "... -> ... 1")
+            if self.setting == Setting.UNIVARIATE:
+                past = rearrange(past, "... -> ... 1")
+                future = rearrange(future, "... -> ... 1")
+                context_observed = rearrange(context_observed, "... -> ... 1")
+                mean = rearrange(mean, "... -> ... 1")
 
-        context = past[:, -self.context_length :]
-        long_context = past[:, : -self.context_length]
-        prior_context = past[:, -self.prior_context_length :]
+            context = past[:, -self.context_length :]
+            long_context = past[:, : -self.context_length]
+            prior_context = past[:, -self.prior_context_length :]
 
-        if isinstance(self.scaler, LongScaler):
-            scaled_context, loc, scale = self.scaler(context, scale=mean)
-        else:
-            _, loc, scale = self.scaler(past, context_observed)
-            scaled_context = context / scale
-        scaled_long_context = (long_context - loc) / scale
-        scaled_prior_context = (prior_context - loc) / scale
-        scaled_future = (future - loc) / scale
+            if isinstance(self.scaler, LongScaler):
+                scaled_context, loc, scale = self.scaler(context, scale=mean)
+            else:
+                _, loc, scale = self.scaler(past, context_observed)
+                scaled_context = context / scale
+            scaled_long_context = (long_context - loc) / scale
+            scaled_prior_context = (prior_context - loc) / scale
+            scaled_future = (future - loc) / scale
 
-        x1 = torch.cat([scaled_context, scaled_future], dim=-2)
-        batch_size, length, c = x1.shape
+            x1 = torch.cat([scaled_context, scaled_future], dim=-2)
+            batch_size, length, c = x1.shape
 
-        observation_mask = torch.zeros_like(x1)
-        observation_mask[:, : -self.prediction_length] = context_observed[:, -self.context_length :]
+            observation_mask = torch.zeros_like(x1)
+            observation_mask[:, : -self.prediction_length] = context_observed[:, -self.context_length :]
 
-        features = []
-        if self.use_lags:
-            lags = lagged_sequence_values(
-                self.lags_seq,
-                scaled_long_context,
-                x1,
-                dim=1,
+            features = []
+            if self.use_lags:
+                lags = lagged_sequence_values(self.lags_seq, scaled_long_context, x1, dim=1)
+                features.append(lags)
+            
+            input_gp = rearrange(scaled_prior_context, "b l c -> b c l")
+            
+            dists = self.q0.gp_regression(input_gp, self.prediction_length)
+
+            fut = torch.stack([d.sample() for d in dists], dim=0)  # [B, L+pred, N]
+            fut_mean = torch.stack([d.mean for d in dists], dim=0)
+            fut_std = torch.stack([d.variance.sqrt() for d in dists], dim=0)
+
+            # Take prediction part
+            fut = fut[:, -self.prediction_length:, :]
+            fut_mean = fut_mean[:, -self.prediction_length:, :]
+            fut_std = fut_std[:, -self.prediction_length:, :]
+
+            features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
+            features.append(observation_mask.unsqueeze(-1))
+
+            x0 = torch.cat([scaled_context, fut], dim=-2)
+
+            return (
+                x1.float(),
+                x0.float(),
+                observation_mask.float(),
+                loc.float(),
+                scale.float(),
+                torch.cat(features, dim=-1).float(),
             )
-            features.append(lags)
 
-        dist = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), ids, self.prediction_length)
-
-        fut = rearrange(dist.sample(), "(b c) l -> b l c", c=c)
-        fut_mean = rearrange(dist.mean, "(b c) l -> b l c", c=c)
-        fut_std = torch.diagonal(dist.covariance_matrix, dim1=-2, dim2=-1)
-        fut_std = rearrange(fut_std, "(b c) ... -> b ... c", c=c)
-        features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
-        features.append(observation_mask.unsqueeze(-1))
-        x0 = torch.cat([scaled_context, fut], dim=-2)
-
-        features = torch.cat(features, dim=-1)
-        return x1, x0, observation_mask, loc, scale, features
 
     @typechecked
     def training_step(self, data: dict, idx: int) -> dict:
@@ -185,6 +195,7 @@ class TSFlowCond(TSFlowBase):
         past_target = past_target.to(self.device).repeat_interleave(self.num_samples, dim=0)
         past_observed_values = past_observed_values.to(self.device).repeat_interleave(self.num_samples, dim=0)
         mean = mean.to(self.device).repeat_interleave(self.num_samples, dim=0)
+
         future_target = torch.zeros_like(past_target[:, -self.prediction_length :])
         data = dict(
             past_target=past_target,
@@ -194,7 +205,14 @@ class TSFlowCond(TSFlowBase):
             id = id
         )
         observation, x0, observation_mask, loc, scale, features = self._extract_features(data)
+
+        self.info(f"Shapes of x0 during eval: {x0.shape}")
+        
+        self.info(f"Shapes of observation during eval: {observation.shape}")
         x0 = x0 + self.sigmax * torch.randn_like(x0)
+
+        self.info(f"Shapes of x0 after adding noise during eval: {x0.shape}")
+
         pred = self.sample(
             x0.to(self.device),
             features=features,

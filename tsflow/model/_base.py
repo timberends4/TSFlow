@@ -75,7 +75,7 @@ class TSFlowBase(pl.LightningModule):
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
-            iso=1e-2 if self.prior != Prior.ISO else 0,
+            # iso=1e-2 if self.prior != Prior.ISO else 0,
             info = self.info,
             num_tasks = self.target_dim
         )
