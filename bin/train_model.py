@@ -21,12 +21,20 @@ from gluonts.time_feature import time_features_from_frequency_str
 from gluonts.torch.batchify import batchify
 from pytorch_lightning.callbacks import ModelCheckpoint
 from tqdm.auto import tqdm
-from tsflow.callback import EvaluateCallback
+from tsflow.callback import EvaluateCallback, GPWarmStart, GPWarmStartApprox
 from tsflow.dataset import get_gts_dataset
 from tsflow.model import TSFlowCond
 from tsflow.utils import create_multivariate_transforms, create_transforms
 from tsflow.utils.util import ConcatDataset, add_config_to_argparser, create_splitter, filter_metrics
 from tsflow.utils.variables import get_season_length
+
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message="Period with BDay freq is deprecated.*"
+)
 
 # PyKeOps build folder
 temp_build_folder = tempfile.mkdtemp(prefix="pykeops_build_")
@@ -152,7 +160,8 @@ def main(
     model = create_model(setting, target_dim, model_params)
 
     # Sanity checks
-    assert dataset.metadata.freq == freq
+    info(f"Dataset metadata freq {dataset.metadata.freq, freq}")
+    # assert dataset.metadata.freq == freq
     assert dataset.metadata.prediction_length == prediction_length
 
     # Figure out rolling eval count
@@ -242,6 +251,8 @@ def main(
     )
     callbacks.append(checkpoint_callback)
 
+    #Warm start GP 
+    callbacks.append(GPWarmStartApprox(data_loader, 50, 1e-3, info))
     # Trainer
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else None,

@@ -9,7 +9,7 @@ from torchdyn.core import NeuralODE
 from torchtyping import TensorType
 from typeguard import typechecked
 
-from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistMultiTaskApprox
 from tsflow.utils.optimal_transport import OTPlanSampler
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, get_lags_for_freq, get_season_length
@@ -71,13 +71,14 @@ class TSFlowBase(pl.LightningModule):
         self.sigmin = sigm
         self.sigmax = 1 if self.prior != Prior.ISO else self.sigmin
         self.target_dim = target_dim
-        self.q0 = Q0DistMultiTask(
+        info(f"num_Tasks passed to Q0Dist from base function: {self.target_dim}")
+        self.q0 = Q0DistMultiTaskApprox(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
             # iso=1e-2 if self.prior != Prior.ISO else 0,
             info = self.info,
-            num_tasks = self.target_dim
+            num_tasks = self.target_dim,
         )
 
     def _extract_features(self, data):

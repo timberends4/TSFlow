@@ -13,7 +13,7 @@ from typing import Union, List
 from tsflow.arch import BackboneModel
 # from tsflow.arch.backbones import BackboneModelMultivariate
 from tsflow.model._base import PREDICTION_INPUT_NAMES, TSFlowBase
-from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistMultiTaskApprox
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, Setting
 
@@ -47,6 +47,7 @@ class TSFlowCond(TSFlowBase):
             prior_params=prior_params,
             optimizer_params=optimizer_params,
             frequency=frequency,
+            target_dim=target_dim,
             normalization=normalization,
             use_lags=use_lags,
             use_ema=use_ema,
@@ -80,13 +81,15 @@ class TSFlowCond(TSFlowBase):
         self.setting = setting
         self.guidance_scale = 0
         self.sigmax = self.sigmin
-        self.q0 = Q0DistMultiTask(
+
+        info(f"Target dim passed to Q0Dist in tsflow_cond {target_dim}")
+        self.q0 = Q0DistMultiTaskApprox(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
             # iso=1e-1 if self.prior != Prior.ISO else 0,
             info = info,
-            num_tasks = target_dim
+            num_tasks = target_dim,
         )
         self.num_tasks = target_dim
 
@@ -205,13 +208,8 @@ class TSFlowCond(TSFlowBase):
             id = id
         )
         observation, x0, observation_mask, loc, scale, features = self._extract_features(data)
-
-        self.info(f"Shapes of x0 during eval: {x0.shape}")
         
-        self.info(f"Shapes of observation during eval: {observation.shape}")
         x0 = x0 + self.sigmax * torch.randn_like(x0)
-
-        self.info(f"Shapes of x0 after adding noise during eval: {x0.shape}")
 
         pred = self.sample(
             x0.to(self.device),

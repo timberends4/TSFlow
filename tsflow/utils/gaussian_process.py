@@ -4,13 +4,22 @@ from torchtyping import TensorType
 
 from typing import List, Union, Optional
 
+import math
 import gpytorch
-from gpytorch.means import ConstantMean, ZeroMean
-from gpytorch.kernels import RBFKernel, ScaleKernel, MultitaskKernel
+from gpytorch.means import ConstantMean, ZeroMean, MultitaskMean
+from gpytorch.kernels import RBFKernel, ScaleKernel, MultitaskKernel, GridInterpolationKernel
 from gpytorch.distributions import MultitaskMultivariateNormal
 from gpytorch.likelihoods import MultitaskGaussianLikelihood
 from gpytorch.models import ExactGP
 from gpytorch.settings import fast_pred_var 
+
+from torch import Tensor
+from gpytorch.models import ApproximateGP
+from gpytorch.variational import (
+    VariationalStrategy,
+    CholeskyVariationalDistribution,
+    MultitaskVariationalStrategy
+)
 
 from tsflow.utils.variables import Prior
 
@@ -65,18 +74,19 @@ class Q0DistMultiTask(torch.nn.Module):
     def __init__(
         self,
         kernel,  # still unused; fixed to RBF
-        context_freqs: int,
         prediction_length: int,
         num_tasks: int = 370,
         freq: int = 24,
         gamma: float = 1.0,
         iso: float = 1e-4,
         info=None,
+        context_freqs: int = 1,
+        device = 'cuda'
     ):
         super().__init__()
         self.info = info
         self.freq = freq
-        self.num_tasks = 370
+        self.num_tasks = num_tasks
         self.gamma = torch.tensor(gamma, dtype=torch.float64)
         self.iso = torch.tensor(iso, dtype=torch.float64)
 
@@ -102,8 +112,8 @@ class Q0DistMultiTask(torch.nn.Module):
         self.likelihood.raw_noise.requires_grad_(False)
 
         # # Set per-task noises to iso (fixed)
-        # self.likelihood.task_noises = torch.full((num_tasks,), self.iso, dtype=torch.float64)
-        # self.likelihood.raw_task_noises.requires_grad_(False)
+        self.likelihood.task_noises = torch.full((self.num_tasks,), self.iso, dtype=torch.float64)
+        self.likelihood.raw_task_noises.requires_grad_(False)
 
         class ExactMultitaskGP(ExactGP):
             def __init__(self, train_x, train_y, likelihood, num_tasks):
@@ -113,13 +123,24 @@ class Q0DistMultiTask(torch.nn.Module):
                 gpytorch.means.ZeroMean(), num_tasks=num_tasks
                 )
                 base_kernel = RBFKernel()
-                base_kernel.lengthscale = gamma
-                base_kernel.raw_lengthscale.requires_grad = False
+                # base_kernel.lengthscale = gamma
+                # base_kernel.raw_lengthscale.requires_grad = False
 
-                self.covar_module = MultitaskKernel(
+                # -- Wrap in GridInterpolationKernel for Toeplitz/FFT speedups
+                time_dim = train_x.size(0)
+                grid_size = 2 ** math.ceil(math.log2(time_dim))
+                grid_kernel = GridInterpolationKernel(
                     base_kernel,
+                    grid_size=grid_size,
+                    grid_bounds=[(train_x.min().item(), train_x.max().item())],
+                )
+
+                # -- Multitask over that grid kernel
+                self.covar_module = MultitaskKernel(
+                    grid_kernel,
                     num_tasks=num_tasks,
-                    rank = 3)
+                    rank=8,
+                )
 
             def forward(self, x):  # x: [B, T]
                 mean_x = self.mean_module(x)  # [B, T]
@@ -144,74 +165,251 @@ class Q0DistMultiTask(torch.nn.Module):
         pred_dist = self.likelihood(self.model(self.t))
         return pred_dist.rsample(num_samples)
     
-    def gp_regression(self, x: TensorType[float, "B", "C", "L"], prediction_length: int) -> List[MV]:
-        batch_size, num_tasks, context_len = x.shape
-        results = []
+    def gp_regression(
+        self,
+        x: TensorType[float, "B", "C", "L"],
+        prediction_length: int
+    ) -> List[MV]:
+        """
+        Run GP posterior prediction using a pre-trained multitask GP.
+        x: [batch, num_tasks, context_length]
+        returns one MV per batch element, each over (prediction_length * num_tasks).
+        """
+        device = self.t.device
+        B, C, L = x.shape
 
-        for b in range(batch_size):
-            x_b = x[b].T  # [L, N]
+        # full time‐grid and context slice (same for every batch element)
+        full_t = self.t.to(device)      # [L + prediction_length]
+        t_ctx  = full_t[:L]             # [L]
 
-            # Compute group mean (loc_freq)
-            loc_freq = x_b.mean(0, keepdims=True)  # [1, N]
+        # put model into eval mode once
+        self.model.eval()
+        self.likelihood.eval()
 
-            # Center data by subtracting loc_freq
-            x_centered = x_b - loc_freq  # [L, N]
+        results = [None] * B
 
-            # Build targets: center context, pad nan for future
-            targets_gp = torch.cat([
-                x_centered,
-                torch.full((prediction_length, num_tasks), float("nan"), device=x.device, dtype=x.dtype)
-            ])
+        # do *all* of the loop under a single no_grad + fast_pred_var context
+        with torch.no_grad(), \
+            gpytorch.settings.fast_pred_var(), \
+            gpytorch.settings.max_root_decomposition_size(100):
 
-            inputs_gp = self.t[:targets_gp.shape[0]]
+            for b in range(B):
+                # —————————————————————————————————————————————————————————
+                # 1) de-bias the context
+                # —————————————————————————————————————————————————————————
+                x_b     = x[b].to(device)                   # [C, L]
+                loc     = x_b.mean(dim=1, keepdim=True)     # [C, 1]
+                x_center = x_b - loc                        # [C, L]
 
-            self.model.set_train_data(inputs=inputs_gp, targets=targets_gp, strict=False)
+                # —————————————————————————————————————————————————————————
+                # 2) set the GP’s "training" data to just the context
+                # —————————————————————————————————————————————————————————
+                # GPyTorch expects train_x: [L], train_y: [L, C]
+                train_y = x_center.T                        # [L, C]
+                self.model.set_train_data(
+                    inputs=t_ctx,
+                    targets=train_y,
+                    strict=False
+                )
 
-            # You may still choose to do quick fine-tuning
-            self.model.train()
-            self.likelihood.train()
+                # —————————————————————————————————————————————————————————
+                # 3) one batched forward over the *entire* grid
+                # —————————————————————————————————————————————————————————
+                # this gives you p(f | context) at every time in full_t
+                f_dist  = self.model(full_t)                
+                y_dist  = self.likelihood(f_dist)
 
-            optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+                results[b] = y_dist
 
-            for i in range(2):
-                self.info("Training it {i}")
-                optimizer.zero_grad()
-                output = self.model(inputs_gp)
-                loss = -self.likelihood(output).log_prob(targets_gp).sum()
-                loss.backward()
-                optimizer.step()
-
-            # Predict
-            self.model.eval()
-            self.likelihood.eval()
-
-            pred_dist = self.likelihood(self.model(self.t))
-
-            # Add back loc_freq to the mean
-            mean_rescaled = pred_dist.mean + loc_freq.repeat(pred_dist.mean.shape[0], 1)
-            cov_rescaled = pred_dist.covariance_matrix
-
-            results.append(MV(mean_rescaled, cov_rescaled))
-
-            self.model.prediction_strategy = None
+                # clear the cached strategy so the next b re-computes fresh
+                self.model.prediction_strategy = None
 
         return results
 
+
+class ApproxMultitaskGP(ApproximateGP):
+    def __init__(
+        self,
+        inducing_points: torch.Tensor,
+        num_tasks: int,
+        rank: int = 8,
+    ):
+        # Variational distribution over inducing outputs (one per task)
+        variational_distribution = CholeskyVariationalDistribution(
+            num_inducing_points=inducing_points.size(0),
+            batch_shape=torch.Size([num_tasks]),
+        )
+        # Base variational strategy (one GP per task)
+        variational_strategy = VariationalStrategy(
+            self,
+            inducing_points,
+            variational_distribution,
+            learn_inducing_locations=True,
+        )
+        # Wrap for multitask
+        multitask_strategy = MultitaskVariationalStrategy(
+            variational_strategy,
+            num_tasks=num_tasks,
+        )
+        super().__init__(multitask_strategy)
+
+        # Mean module: zero mean per task
+        self.mean_module = gpytorch.means.MultitaskMean(ZeroMean(), num_tasks=num_tasks)
+
+        # Base kernel + optional grid interpolation for speed
+        base_kernel = RBFKernel()
+        time_dim = inducing_points.size(0)
+        grid_size = 2 ** math.ceil(math.log2(time_dim))
+        grid_kernel = GridInterpolationKernel(
+            base_kernel,
+            grid_size=grid_size,
+            grid_bounds=[(inducing_points.min().item(), inducing_points.max().item())],
+        )
+        # Multitask kernel over the grid
+        self.covar_module = MultitaskKernel(
+            grid_kernel,
+            num_tasks=num_tasks,
+            rank=rank,
+        )
+
+    def forward(self, x: Tensor):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return MultitaskMultivariateNormal(mean_x, covar_x)
+
+
+class ApproxMultitaskGP(ApproximateGP):
+    def __init__(
+        self,
+        inducing_points: torch.Tensor,
+        num_tasks: int,
+        rank: int = 8,
+    ):
+        variational_distribution = CholeskyVariationalDistribution(
+            num_inducing_points=inducing_points.size(0),
+            batch_shape=torch.Size([num_tasks]),
+        )
+        variational_strategy = VariationalStrategy(
+            self,
+            inducing_points,
+            variational_distribution,
+            learn_inducing_locations=True,
+        )
+        multitask_strategy = MultitaskVariationalStrategy(
+            variational_strategy,
+            num_tasks=num_tasks,
+        )
+        super().__init__(multitask_strategy)
+
+        self.mean_module = MultitaskMean(ZeroMean(), num_tasks=num_tasks)
+
+        base_kernel = RBFKernel()
+
+        self.covar_module = MultitaskKernel(
+            base_kernel,
+            num_tasks=num_tasks,
+            rank=rank,
+        )
+
+    def forward(self, x: Tensor):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return MultitaskMultivariateNormal(mean_x, covar_x)
+
+
+class Q0DistMultiTaskApprox(torch.nn.Module):
+    def __init__(
+        self,
+        kernel,
+        prediction_length: int,
+        num_tasks: int = 370,
+        freq: int = 24,
+        gamma: float = 1.0,
+        iso: float = 1e-4,
+        info=None,
+        context_freqs: int = 1,
+        device: str = 'cuda',
+        num_inducing: int = 50,
+    ):
+        super().__init__()
+        self.info = info
+        self.freq = freq
+        self.num_tasks = num_tasks
+        self.gamma = torch.tensor(gamma, dtype=torch.float64)
+        self.iso   = torch.tensor(iso,   dtype=torch.float64)
+
+        self.context_length    = context_freqs * prediction_length
+        self.prediction_length = prediction_length
+        self.window_length     = self.context_length + self.prediction_length
+
+        self.register_buffer(
+            't', torch.arange(self.window_length, dtype=torch.float64) * (math.pi / freq)
+        )
+
+        self.register_buffer(
+            't_obs', torch.cat([
+                torch.ones(self.context_length), torch.zeros(self.prediction_length)
+            ]).bool()
+        )
+        self.register_buffer('t_new', ~self.t_obs)
+
+        self.likelihood = MultitaskGaussianLikelihood(num_tasks=self.num_tasks)
+        self.likelihood.noise = self.iso
+        self.likelihood.raw_noise.requires_grad_(False)
+        self.likelihood.task_noises = torch.full((self.num_tasks,), self.iso, dtype=torch.float64)
+        self.likelihood.raw_task_noises.requires_grad_(False)
+
+        idx = torch.linspace(
+            0, self.window_length - 1, steps=min(num_inducing, self.window_length)
+        ).long()
+        inducing_pts = self.t[idx].unsqueeze(-1)
+
+        self.model = ApproxMultitaskGP(
+            inducing_points=inducing_pts,
+            num_tasks=self.num_tasks,
+            rank=8,
+        ).to(device)
+
+        self.model = self.model.double()
+        self.likelihood = self.likelihood.double()
+
+        if self.info:
+            self.info(f"[Q0DistMultiTaskApprox] using ApproximateGP w/ {inducing_pts.size(0)} inducing points")
+
+    def log_likelihood(self, x: torch.Tensor) -> torch.Tensor:
+        pred_dist = self.model(self.t.unsqueeze(-1))
+        lik = self.likelihood(pred_dist)
+        return lik.log_prob(x.reshape(-1, self.num_tasks))
+
+    def forward(self, num_samples: int) -> torch.Tensor:
+        pred_dist = self.likelihood(self.model(self.t.unsqueeze(-1)))
+        return pred_dist.rsample(torch.Size([num_samples]))
+
+    def gp_regression(self, x: torch.Tensor, prediction_length: int):
+        device = self.t.device
+        B, C, L = x.shape
+
+        full_t = self.t.to(device)
+        t_ctx  = full_t[:L]
+
+        self.model.eval()
+        self.likelihood.eval()
+
+        results = []
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            for b in range(B):
+                x_b = x[b].to(device)
+                loc = x_b.mean(dim=1, keepdim=True)
+                x_center = x_b - loc
+
+                train_y = x_center.T
+                # Optionally update inducing locations or skip
+                f_dist = self.model(full_t.unsqueeze(-1))
+                y_dist = self.likelihood(f_dist)
+                results.append(y_dist)
+
+        return results
     
-    # def gp_regression(self, x: TensorType[float, "B", "T"], prediction_length: int) -> MV:
-    #     targets_gp = torch.cat([x.reshape(-1, self.num_tasks), torch.full((prediction_length, self.num_tasks), float("nan"), device = x.device, dtype=x.dtype)])
-        
-    #     self.model.set_train_data(
-    #         inputs = self.t,
-    #         targets = targets_gp,
-    #         strict=False
-    #     )
-
-    #     pred_dist = self.likelihood(self.model(self.t))
-
-    #     return pred_dist
-
-
 class Q0Dist(torch.nn.Module):
     def __init__(
         self,
