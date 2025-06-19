@@ -72,7 +72,7 @@ class TSFlowBase(pl.LightningModule):
         self.sigmax = 1 if self.prior != Prior.ISO else self.sigmin
         self.target_dim = target_dim
         info(f"num_Tasks passed to Q0Dist from base function: {self.target_dim}")
-        self.q0 = Q0DistMultiTaskApprox(
+        self.q0 = Q0DistMultiTask(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,

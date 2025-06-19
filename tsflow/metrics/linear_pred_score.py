@@ -8,7 +8,7 @@ from gluonts.dataset.split import slice_data_entry
 from gluonts.evaluation import Evaluator
 from gluonts.transform import AdhocTransform, Chain
 
-from tsflow.model import LinearEstimator
+# from tsflow.model import LinearEstimator
 from tsflow.utils.transforms import ScaleAndAddLongMeanFeature, ScaleAndAddMinMaxFeature
 from tsflow.utils.util import GluonTSNumpyDataset, make_evaluation_predictions_with_scaling
 

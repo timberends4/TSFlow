@@ -14,6 +14,11 @@ def wasserstein(
     power: int = 2,
     **kwargs,
 ) -> float:
+
+    common_dtype = torch.float64
+    x0 = x0.to(common_dtype)
+    x1 = x1.to(common_dtype)
+
     assert power == 1 or power == 2
     # ot_fn should take (a, b, M) as arguments where a, b are marginals and
     # M is a cost matrix

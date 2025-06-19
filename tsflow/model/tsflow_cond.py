@@ -83,7 +83,7 @@ class TSFlowCond(TSFlowBase):
         self.sigmax = self.sigmin
 
         info(f"Target dim passed to Q0Dist in tsflow_cond {target_dim}")
-        self.q0 = Q0DistMultiTaskApprox(
+        self.q0 = Q0DistMultiTask(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,

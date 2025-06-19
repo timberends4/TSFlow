@@ -25,6 +25,7 @@ from tsflow.utils import Setting
 from tsflow.utils.plots import plot_figures
 from tsflow.utils.util import create_splitter
 from tsflow.utils.util import LongScaler
+from tsflow.metrics import wasserstein
 
 import gpytorch 
 
@@ -36,81 +37,84 @@ class GPWarmStartApprox(Callback):
         self.lr = lr
         self.info = info
 
-    def on_fit_start(self, trainer, pl_module):
-        gp = pl_module.q0
-        device = pl_module.device
+    # def on_fit_start(self, trainer, pl_module):
+    #     gp = pl_module.q0
+    #     device = pl_module.device
 
-        self.info(f"Device used: {device}")
-        gp.model.to(device)
-        gp.likelihood.to(device)
+    #     self.info(f"Device used: {device}")
+    #     gp.model.to(device)
+    #     gp.likelihood.to(device)
 
-        # Collect all parameters
-        all_params = {id(p): p for p in chain(gp.model.parameters(), gp.likelihood.parameters())}
-        named = dict(gp.model.named_parameters())
-        named.update(dict(gp.likelihood.named_parameters()))
-        self.info(f"GP hyperparameters:{named.keys()}))")
+    #     # Collect all parameters
+    #     all_params = {id(p): p for p in chain(gp.model.parameters(), gp.likelihood.parameters())}
+    #     named = dict(gp.model.named_parameters())
+    #     named.update(dict(gp.likelihood.named_parameters()))
+    #     self.info(f"GP hyperparameters:{named.keys()}))")
 
-        optimizer = torch.optim.Adam(list(all_params.values()), lr=self.lr)
-        # Variational ELBO setup
-        num_data = gp.context_length * gp.num_tasks
-        mll_elbo = VariationalELBO(gp.likelihood, gp.model, num_data=num_data)
+    #     optimizer = torch.optim.Adam(list(all_params.values()), lr=self.lr)
+    #     # Variational ELBO setup
+    #     num_data = gp.context_length * gp.num_tasks
+    #     mll_elbo = VariationalELBO(gp.likelihood, gp.model, num_data=num_data)
 
-        # Prepare time grids
-        t_full = gp.t.to(device)
-        t_c = gp.context_length
-        X_ctx = t_full[:t_c].unsqueeze(-1)
-        X_fut = t_full[t_c:].unsqueeze(-1)
+    #     # Prepare time grids
+    #     t_full = gp.t.to(device)
+    #     t_c = gp.context_length
+    #     X_ctx = t_full[:t_c].unsqueeze(-1)
+    #     X_fut = t_full[t_c:].unsqueeze(-1)
 
-        for epoch in range(self.n_epochs):
-            epoch_loss = 0.0
-            for batch in self.train_loader:
-                # Scale context and future
-                past = batch["past_target"].to(device)
-                obs = batch["past_observed_values"].to(device)
-                mean = batch["mean"].to(device)
-                fut_target = batch["future_target"].to(device)
+    #     compute_wasserstein_avg()
 
-                if isinstance(pl_module.scaler, LongScaler):
-                    scaled_ctx, loc, scale = pl_module.scaler(past[:, -t_c:], scale=mean)
-                else:
-                    _, loc, scale = pl_module.scaler(past, obs)
-                    scaled_ctx = past[:, -t_c:] / scale
-                scaled_fut = (fut_target - loc) / scale
+    #     for epoch in range(self.n_epochs):
+    #         epoch_loss = 0.0
+    #         for batch in self.train_loader:
+    #             # Scale context and future
+    #             past = batch["past_target"].to(device)
+    #             obs = batch["past_observed_values"].to(device)
+    #             mean = batch["mean"].to(device)
+    #             fut_target = batch["future_target"].to(device)
 
-                # Assume batch_size = 1
-                B, _, C = scaled_ctx.shape  # B=1
-                Y_ctx = scaled_ctx.reshape(B*C, t_c)  # [C, t_c]
-                Y_fut = scaled_fut.reshape(B*C, t_c)  # [C, t_f]
+    #             if isinstance(pl_module.scaler, LongScaler):
+    #                 scaled_ctx, loc, scale = pl_module.scaler(past[:, -t_c:], scale=mean)
+    #             else:
+    #                 _, loc, scale = pl_module.scaler(past, obs)
+    #                 scaled_ctx = past[:, -t_c:] / scale
+    #             scaled_fut = (fut_target - loc) / scale
 
-                # (A) Context ELBO
-                gp.model.train(); gp.likelihood.train()
-                optimizer.zero_grad()
-                out_ctx = gp.model(X_ctx)                     # dist with batch_shape=[C], event_shape=[t_c]
-                loss_ctx = -mll_elbo(out_ctx, Y_ctx)
+    #             # Assume batch_size = 1
+    #             B, _, C = scaled_ctx.shape  # B=1
+    #             Y_ctx = scaled_ctx.reshape(B*C, t_c)  # [C, t_c]
+    #             Y_fut = scaled_fut.reshape(B*C, t_c)  # [C, t_f]
 
-                self.info(f"Past calculting context loss")
+    #             # (A) Context ELBO
+    #             gp.model.train(); gp.likelihood.train()
+    #             optimizer.zero_grad()
+    #             out_ctx = gp.model(X_ctx)                     # dist with batch_shape=[C], event_shape=[t_c]
+    #             loss_ctx = -mll_elbo(out_ctx, Y_ctx)
 
-                # (B) Predictive posterior LL via fantasy model
-                gp.model.eval(); gp.likelihood.eval()
-                # Condition on observed context
-                fantasy_model = gp.model.get_fantasy_model(X_ctx, Y_ctx)
-                fantasy_model.eval()
-                with gpytorch.settings.fast_pred_var():
-                    f_dist = fantasy_model(X_fut)         # [C, t_f]
-                y_dist = gp.likelihood(f_dist)            # adds noise
-                loss_fut = -y_dist.log_prob(Y_fut).sum()
+    #             self.info(f"Past calculting context loss")
 
-                # (C) Combine & step
-                (loss_ctx + loss_fut).backward()
-                optimizer.step()
-                epoch_loss += (loss_ctx + loss_fut).item()
+    #             # (B) Predictive posterior LL via fantasy model
+    #             gp.model.eval(); gp.likelihood.eval()
+    #             # Condition on observed context
+    #             fantasy_model = gp.model.get_fantasy_model(X_ctx, Y_ctx)
+    #             fantasy_model.eval()
+    #             with gpytorch.settings.fast_pred_var():
+    #                 f_dist = fantasy_model(X_fut)         # [C, t_f]
+    #             y_dist = gp.likelihood(f_dist)            # adds noise
+    #             loss_fut = -y_dist.log_prob(Y_fut).sum()
 
-            self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs} loss={epoch_loss:.3f}")
+    #             # (C) Combine & step
+    #             (loss_ctx + loss_fut).backward()
+    #             optimizer.step()
+    #             epoch_loss += (loss_ctx + loss_fut).item()
 
-        # Freeze GP
-        for p in gp.model.parameters(): p.requires_grad_(False)
-        for p in gp.likelihood.parameters(): p.requires_grad_(False)
-        gp.model.eval(); gp.likelihood.eval()
+    #         self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs} loss={epoch_loss:.3f}")
+
+    #     compute_wasserstein_avg()
+    #     # Freeze GP
+    #     for p in gp.model.parameters(): p.requires_grad_(False)
+    #     for p in gp.likelihood.parameters(): p.requires_grad_(False)
+    #     gp.model.eval(); gp.likelihood.eval()
 
         # # Plot & log to Aim
         # batch0 = next(iter(self.train_loader))
@@ -213,6 +217,39 @@ class GPWarmStart(Callback):
         self.lr = lr
         self.info = info
 
+    def compute_wasserstein_avg(self, gp, pl_module, X_fut, t_c, device):
+        gp.model.eval(); gp.likelihood.eval()
+        wd = []
+        for batch in self.train_loader:
+            past = batch["past_target"].to(device)
+            obs = batch["past_observed_values"].to(device)
+            mean = batch["mean"].to(device)
+            fut_target = batch["future_target"].to(device)
+
+            if isinstance(pl_module.scaler, LongScaler):
+                scaled_ctx, loc, scale = pl_module.scaler(past[:, -t_c:], scale=mean)
+            else:
+                _, loc, scale = pl_module.scaler(past, obs)
+                scaled_ctx = past[:, -t_c:] / scale
+            scaled_fut = (fut_target - loc) / scale
+
+            B, _, C = scaled_ctx.shape
+            Y_fut = scaled_fut.reshape(B * C, -1)  # [B*C, t_f]
+
+            with torch.no_grad(), gpytorch.settings.fast_pred_var():
+                f_dist = gp.model(X_fut)
+                y_dist = gp.likelihood(f_dist)
+                y_pred = y_dist.mean.T  # [B*C, t_f]
+
+            wd_batch = wasserstein(y_pred, Y_fut)
+            wd.append(wd_batch)
+
+        avg_ws = np.mean(wd)
+        self.info(f"Wasserstein distance: {avg_ws:.4f}")
+        gp.model.train(); gp.likelihood.train()
+        return avg_ws
+
+
     def on_fit_start(self, trainer, pl_module):
         gp     = pl_module.q0
         device = pl_module.device
@@ -257,6 +294,9 @@ class GPWarmStart(Callback):
         # ---------------------------------------------------
         # WARM-START LOOP
         # ---------------------------------------------------
+
+        self.compute_wasserstein_avg(gp, pl_module, X_fut, t_c, device)
+
         for epoch in range(self.n_epochs):
             epoch_loss = 0.0
 
@@ -285,7 +325,6 @@ class GPWarmStart(Callback):
                 # ---------------------------------------------------
                 # (A) CONTEXT MARGINAL LL
                 # ---------------------------------------------------
-                self.info(f"Up until setting train data succesful")
                 gp.model.set_train_data(inputs=X_ctx, targets=Y_ctx, strict=False)
                 gp.model.train(); gp.likelihood.train()
                 optimizer.zero_grad()
@@ -298,7 +337,6 @@ class GPWarmStart(Callback):
                 # ---------------------------------------------------
                 # temporarily switch to eval‐mode *only* to avoid the "must train"
                 # check; gradients are still tracked
-                self.info(f"Up until predicitng succesful")
                 gp.model.eval(); gp.likelihood.eval()
                 with gpytorch.settings.fast_pred_var():
                     f_dist = gp.model(X_fut)                       # latent posterior
@@ -321,9 +359,31 @@ class GPWarmStart(Callback):
 
             self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs}  loss={epoch_loss:.3f}")
 
+        self.compute_wasserstein_avg(gp, pl_module, X_fut, t_c, device)
+
         # Freeze GP
-        for p in gp.model.parameters(): p.requires_grad_(False)
-        for p in gp.likelihood.parameters(): p.requires_grad_(False)
+        for name, param in gp.model.named_parameters():
+            param.requires_grad_(False)
+            self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
+
+        if "covar_factor" in name:
+            # Compute full task covariance matrix
+            B_full = param @ param.T  # [num_tasks, num_tasks]
+            
+            # Compute correlation matrix
+            diag = torch.diag(B_full).sqrt()
+            denom = diag.unsqueeze(0) * diag.unsqueeze(1)
+            corr = B_full / (denom + 1e-8)  # add epsilon for numerical stability
+
+            # Log or print
+            self.info(f"Full task covariance matrix B:\n{B_full.cpu().numpy()}")
+            self.info(f"Task correlation matrix:\n{corr.cpu().numpy()}")
+
+        self.info("Freezing GP likelihood parameters:")
+        for name, param in gp.likelihood.named_parameters():
+            param.requires_grad_(False)
+            self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
+
         gp.model.eval(); gp.likelihood.eval()
 
         # Plot & log to Aim

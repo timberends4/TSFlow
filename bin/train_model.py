@@ -252,7 +252,7 @@ def main(
     callbacks.append(checkpoint_callback)
 
     #Warm start GP 
-    callbacks.append(GPWarmStartApprox(data_loader, 50, 1e-3, info))
+    callbacks.append(GPWarmStart(data_loader, 25, 1e-2, info))
     # Trainer
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else None,

@@ -113,7 +113,7 @@ class Q0DistMultiTask(torch.nn.Module):
 
         # # Set per-task noises to iso (fixed)
         self.likelihood.task_noises = torch.full((self.num_tasks,), self.iso, dtype=torch.float64)
-        self.likelihood.raw_task_noises.requires_grad_(False)
+        # self.likelihood.raw_task_noises.requires_grad_(False)
 
         class ExactMultitaskGP(ExactGP):
             def __init__(self, train_x, train_y, likelihood, num_tasks):
@@ -122,9 +122,9 @@ class Q0DistMultiTask(torch.nn.Module):
                 self.mean_module = gpytorch.means.MultitaskMean(
                 gpytorch.means.ZeroMean(), num_tasks=num_tasks
                 )
-                base_kernel = RBFKernel()
-                # base_kernel.lengthscale = gamma
-                # base_kernel.raw_lengthscale.requires_grad = False
+                base_kernel = gpytorch.kernels.MaternKernel(nu=0.5)
+                base_kernel.lengthscale = gamma
+                base_kernel.raw_lengthscale.requires_grad = False
 
                 # -- Wrap in GridInterpolationKernel for Toeplitz/FFT speedups
                 time_dim = train_x.size(0)

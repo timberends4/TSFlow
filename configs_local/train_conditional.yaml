@@ -31,7 +31,7 @@ model_params:
 
   prior_params:
     kernel: ou
-    gamma: 0.70710678
+    gamma: 1
     iso: 0.001
 
   ema_params: 
@@ -57,4 +57,4 @@ evaluation_params:
   use_validation_set: True
   eval_every: 20
   do_final_eval: True
-seed: 6432
+seed: 6434
