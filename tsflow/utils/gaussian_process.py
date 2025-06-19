@@ -112,8 +112,8 @@ class Q0DistMultiTask(torch.nn.Module):
         self.likelihood.raw_noise.requires_grad_(False)
 
         # # Set per-task noises to iso (fixed)
-        self.likelihood.task_noises = torch.full((self.num_tasks,), self.iso, dtype=torch.float64)
-        # self.likelihood.raw_task_noises.requires_grad_(False)
+        self.likelihood.task_noises = torch.full((self.num_tasks,), self.iso , dtype=torch.float64)
+        self.likelihood.raw_task_noises.requires_grad_(False)
 
         class ExactMultitaskGP(ExactGP):
             def __init__(self, train_x, train_y, likelihood, num_tasks):
@@ -150,6 +150,22 @@ class Q0DistMultiTask(torch.nn.Module):
 
         self.info(f"NUm tasks : {self.num_tasks}")
         self.model = ExactMultitaskGP(train_x, train_y, self.likelihood, self.num_tasks)
+        
+        # Grab the TaskCovarModule
+        task_covar = self.model.covar_module.task_covar_module
+
+        # 1) Zero out the low-rank factor W
+        # task_covar.covar_factor.data.zero_()
+        task_covar.covar_factor.data.fill_(0)
+
+        # 2) Set the diagonal variances so that diag(β²)=I
+        #    raw_var is constrained by a PositiveConstraint
+        constraint = task_covar.raw_var_constraint
+        # Build a tensor of ones in the “true” variance space
+        target_var = torch.ones_like(task_covar.raw_var)
+        # Map back to raw-var space
+        raw_var_val = constraint.inverse_transform(target_var)
+        task_covar.raw_var.data.copy_(raw_var_val)
 
         self.model = self.model.double()
         self.likelihood = self.likelihood.double()
@@ -181,7 +197,7 @@ class Q0DistMultiTask(torch.nn.Module):
         # full time‐grid and context slice (same for every batch element)
         full_t = self.t.to(device)      # [L + prediction_length]
         t_ctx  = full_t[:L]             # [L]
-
+        t_fut = full_t[L:]
         # put model into eval mode once
         self.model.eval()
         self.likelihood.eval()
@@ -189,40 +205,47 @@ class Q0DistMultiTask(torch.nn.Module):
         results = [None] * B
 
         # do *all* of the loop under a single no_grad + fast_pred_var context
-        with torch.no_grad(), \
-            gpytorch.settings.fast_pred_var(), \
-            gpytorch.settings.max_root_decomposition_size(100):
+        # with gpytorch.settings.fast_pred_var(), \
+        #     gpytorch.settings.max_root_decomposition_size(100):
 
-            for b in range(B):
-                # —————————————————————————————————————————————————————————
-                # 1) de-bias the context
-                # —————————————————————————————————————————————————————————
-                x_b     = x[b].to(device)                   # [C, L]
-                loc     = x_b.mean(dim=1, keepdim=True)     # [C, 1]
-                x_center = x_b - loc                        # [C, L]
+        for b in range(B):
+            # —————————————————————————————————————————————————————————
+            # 1) de-bias the context
+            # —————————————————————————————————————————————————————————
+            x_b     = x[b].to(device)                   # [C, L]
+            loc     = x_b.mean(dim=1, keepdim=True)     # [C, 1]
+            x_center = x_b - loc                        # [C, L]
 
-                # —————————————————————————————————————————————————————————
-                # 2) set the GP’s "training" data to just the context
-                # —————————————————————————————————————————————————————————
-                # GPyTorch expects train_x: [L], train_y: [L, C]
-                train_y = x_center.T                        # [L, C]
-                self.model.set_train_data(
-                    inputs=t_ctx,
-                    targets=train_y,
-                    strict=False
-                )
+            # —————————————————————————————————————————————————————————
+            # 2) set the GP’s "training" data to just the context
+            # —————————————————————————————————————————————————————————
+            # GPyTorch expects train_x: [L], train_y: [L, C]
+            train_y = x_center.T                        # [L, C]
+            self.model.set_train_data(
+                inputs=t_ctx,
+                targets=train_y,
+                strict=False
+            )
 
-                # —————————————————————————————————————————————————————————
-                # 3) one batched forward over the *entire* grid
-                # —————————————————————————————————————————————————————————
-                # this gives you p(f | context) at every time in full_t
-                f_dist  = self.model(full_t)                
-                y_dist  = self.likelihood(f_dist)
+            # —————————————————————————————————————————————————————————
+            # 3) one batched forward over the *entire* grid
+            # —————————————————————————————————————————————————————————
+            # this gives you p(f | context) at every time in full_t
+            f_dist  = self.model(t_fut)                
+            y_dist  = self.likelihood(f_dist)
 
-                results[b] = y_dist
+            offset = (
+                loc.expand(-1, prediction_length).T.to(device)
+            )
 
-                # clear the cached strategy so the next b re-computes fresh
-                self.model.prediction_strategy = None
+            new_mean = y_dist.mean + offset
+            new_cov = y_dist.lazy_covariance_matrix 
+            y_dist = MultitaskMultivariateNormal(new_mean.float(), new_cov.float())
+
+            results[b] = y_dist
+
+            # clear the cached strategy so the next b re-computes fresh
+            self.model.prediction_strategy = None
 
         return results
 
@@ -530,6 +553,126 @@ class Q0Dist(torch.nn.Module):
         cov = self.cov_reg
         return MV(mean, cov)
 
+class Q0Dist(torch.nn.Module):
+    def __init__(
+        self,
+        kernel: Prior,
+        context_freqs: int,
+        prediction_length: int,
+        freq: int = 24,
+        gamma: float = 1.0,
+        iso: float = 1e-4,
+        info = None
+    ):
+        """
+        Initialize the GP distribution.
+
+        Args:
+            kernel (Prior): The kernel type (e.g. Prior.SE, Prior.OU, Prior.PE, etc.).
+            context_freqs (int): The number of frequency groups in the context.
+            prediction_length (int): The prediction horizon.
+            freq (int, optional): Frequency parameter for time computations. Defaults to 24.
+            gamma (float, optional): The kernel hyperparameter. Defaults to 1.0.
+            iso (float, optional): The isotropic noise level. Defaults to 1e-4.
+        """
+        super().__init__()
+        self.info = info
+        context_length = context_freqs * prediction_length
+        window_length = context_length + prediction_length
+
+        # Convert gamma to a tensor for consistency.
+        self.gamma = torch.tensor(gamma, dtype=torch.float64)
+        self.iso = torch.tensor(iso, dtype=torch.float64)
+        self.kernel = kernel
+        self.freq = freq
+
+        mean = torch.zeros(window_length)
+        cov = get_gp(kernel, self.gamma, window_length, freq) + self.iso * torch.eye(window_length)
+
+        # GP reg
+        t_obs = torch.cat([torch.ones(context_length), torch.zeros(prediction_length)]) == 1
+        t_new = ~t_obs
+
+        # Extract the relevant submatrices from the covariance matrix.
+        K = cov[t_obs][:, t_obs]
+        K_star = cov[t_obs][:, t_new]
+        K_star_star = cov[t_new][:, t_new]
+
+        # Add a small amount of noise to the diagonal to ensure invertibility.
+        K += 1e-4 * torch.eye(K.size(0))
+        K_inv = torch.linalg.inv(K)
+        K_inv_x_K_star = K_inv @ K_star
+        cov_reg = K_star_star - K_star.T @ K_inv_x_K_star
+
+        # Register buffers
+        self.register_buffer("cov_inv", torch.linalg.inv(cov).float(), persistent=False)
+        self.register_buffer("K_inv_x_K_star", K_inv_x_K_star.float(), persistent=False)
+        self.register_buffer("cov_reg", cov_reg.float(), persistent=False)
+
+        self.dist = MV(loc=mean.float(), covariance_matrix=cov.float())
+
+        if self.info:
+            self.info(f"[Q0Dist] kernel={kernel}, γ={gamma}, window={context_freqs*prediction_length + prediction_length}")
+        # … build cov, K_inv, etc. …
+        if self.info:
+            self.info(f"[Q0Dist] cov built, shape={cov.shape}")
+
+    def _apply(self, fn):
+        """
+        Override _apply so that when the module is moved to a new device,
+        we update our precomputed distribution (self.dist) accordingly.
+        """
+        super()._apply(fn)
+        self.dist = MV(
+            loc=self.dist.loc.to(self.cov_inv.device),
+            scale_tril=self.dist.scale_tril.to(self.cov_inv.device),
+        )
+        return self
+
+    def log_likelihood(self, x: TensorType[float, "batch_size", "length"]) -> TensorType[float]:
+        """
+        Compute the log likelihood of the data given the GP distribution.
+        """
+        x = x.to(self.cov_inv.device)
+        return -self.dist.log_prob(x)
+
+    def forward(self, num_samples: int) -> TensorType[float, "num_samples", "length"]:
+        samples = self.dist.sample(torch.Size([num_samples]))
+        samples = samples.view(num_samples, self.t.shape[0], self.num_tasks)
+        return samples
+
+    def gp_regression(self, x: TensorType[float], prediction_length: int) -> MV:
+        """
+        Perform GP regression on input data.
+
+        Args:
+            x (torch.Tensor): Input data tensor of shape [batch_size, window_length].
+            prediction_length (int): Number of prediction points.
+
+        Returns:
+            MultivariateNormal: GP regression posterior.
+        """
+        batch_size = x.size(0)
+        # Reshape x to [batch_size, num_groups, freq] for per-frequency computations.
+        x_reshaped = x.reshape(batch_size, -1, self.freq)
+        loc_freq = x_reshaped.mean(1, keepdims=False)
+
+        # For periodic kernels, set location bias to zero.
+        if self.kernel == Prior.PE:
+            loc_freq = torch.zeros_like(loc_freq)
+
+        # Remove the location bias.
+        repeat_factor = self.K_inv_x_K_star.shape[0] // self.freq
+        x_centered = x - loc_freq.repeat(1, repeat_factor)
+
+        # Compute the regression mean.
+        mean = x_centered @ self.K_inv_x_K_star
+        mean = mean + loc_freq.repeat(1, prediction_length // self.freq)
+
+        # Scale the regression covariance.
+        cov = self.cov_reg
+        return MV(mean, cov)
+    
 
 class Q0Linear(torch.nn.Module):
     def __init__(

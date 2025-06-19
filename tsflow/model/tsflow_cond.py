@@ -124,6 +124,7 @@ class TSFlowCond(TSFlowBase):
             else:
                 _, loc, scale = self.scaler(past, context_observed)
                 scaled_context = context / scale
+                
             scaled_long_context = (long_context - loc) / scale
             scaled_prior_context = (prior_context - loc) / scale
             scaled_future = (future - loc) / scale

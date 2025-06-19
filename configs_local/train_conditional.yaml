@@ -47,14 +47,15 @@ dataset_params:
 
 trainer_params:
   gradient_clip_val: .5
-  max_epochs: 400
+  max_epochs: 100
   num_sanity_val_steps: 0
 
 # Used only in callback,
 # the final evaluation uses 100 samples
 evaluation_params:
-  num_samples: 16
+  num_samples: 100
   use_validation_set: True
-  eval_every: 20
+  eval_every: 10
   do_final_eval: True
+
 seed: 6434

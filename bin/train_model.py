@@ -21,7 +21,7 @@ from gluonts.time_feature import time_features_from_frequency_str
 from gluonts.torch.batchify import batchify
 from pytorch_lightning.callbacks import ModelCheckpoint
 from tqdm.auto import tqdm
-from tsflow.callback import EvaluateCallback, GPWarmStart, GPWarmStartApprox
+from tsflow.callback import EvaluateCallback, GPWarmStart
 from tsflow.dataset import get_gts_dataset
 from tsflow.model import TSFlowCond
 from tsflow.utils import create_multivariate_transforms, create_transforms
@@ -213,6 +213,7 @@ def main(
         training_data, val_gen = train_val_splitter.split(training_data)
 
         transformed_data = transformation.apply(training_data, is_train=True)
+        transformed_testdata = transformation.apply(test_data, is_train=False)
 
         val_data = val_gen.generate_instances(prediction_length, num_rolling_evals)
         transformed_valdata = transformation.apply(ConcatDataset(val_data), is_train=False)
@@ -222,7 +223,7 @@ def main(
                 context_length=model_params["context_length"],
                 prediction_length=prediction_length,
                 model=model,
-                datasets={"val": transformed_valdata},
+                datasets={"val": transformed_valdata, "test": transformed_testdata},
                 logdir=logdir,
                 **evaluation_params,
             )
@@ -252,7 +253,7 @@ def main(
     callbacks.append(checkpoint_callback)
 
     #Warm start GP 
-    callbacks.append(GPWarmStart(data_loader, 25, 1e-2, info))
+    callbacks.append(GPWarmStart(data_loader, 30, 1e-2, info))
     # Trainer
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else None,
