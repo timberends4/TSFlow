@@ -32,22 +32,23 @@ import gpytorch
 
 
 class GPWarmStart(Callback):
-    def __init__(self, train_loader, n_epochs: int, lr: float, info):
+    def __init__(self, train_loader, n_epochs: int, lr: float, info, trained_prior: bool):
         super().__init__()
         self.train_loader = train_loader
         self.n_epochs = n_epochs
         self.lr = lr
         self.info = info
+        self.trained_prior = trained_prior
 
-    def preprocess_input(self, pl_module, t_c, batch, device):
+    def preprocess_input(self, pl_module, batch, device, context_length, prior_context_length):
+        
         past = batch["past_target"].to(device)
         future = batch["future_target"].to(device)
         context_observed = batch["past_observed_values"].to(device)
         mean = batch["mean"].to(device)
 
-        context = past[:, -t_c :]
-        long_context = past[:, : -t_c]
-        prior_context = past[:, -t_c :]
+        context = past[:, -context_length :]
+        prior_context = past[:, -prior_context_length :]
 
         if isinstance(pl_module.scaler, LongScaler):
             scaled_context, loc, scale = pl_module.scaler(context, scale=mean)
@@ -65,18 +66,24 @@ class GPWarmStart(Callback):
     def plot_samples_and_context(self, pl_module, trainer, batch, n_samples, plot_title):
         gp     = pl_module.q0
         device = pl_module.device
-        t_full = gp.t.to(device)                                      # [t_c + t_f]  
-        t_c    = gp.context_length                                    # scalar
 
-        gp.model.eval(); gp.likelihood.eval()
+        if pl_module.trained_prior:
+            gp.model.eval(); gp.likelihood.eval()
         with torch.no_grad():
             K = n_samples
             # Plot & log to Aim
-            scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, t_c, batch, device)
-            dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> b c l"), t_c)
+            scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, batch, device, pl_module.context_length, pl_module.prior_context_length)
+            
+            if pl_module.prior_name == "Q0Dist":
+                dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), pl_module.prediction_length)
+                fut_samples = dist.rsample(torch.Size([K]))
+            
+            elif pl_module.prior_name == "Q0DistMultiTask":
+                dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), pl_module.prediction_length)
 
-            fut_samples = dist[0].rsample(torch.Size([K]))
-            fut_samples = rearrange(fut_samples, "n l c -> n c l")
+                fut_samples = dist[0].rsample(torch.Size([K]))
+                fut_samples = rearrange(fut_samples, "n l c -> n c l")
+
             loc0   = loc[0].squeeze(0).to(device)    # [C]
             scale0 = scale[0].squeeze(0).to(device)  # [C]
 
@@ -96,7 +103,7 @@ class GPWarmStart(Callback):
             std_full  = combined.std(dim=0).cpu().numpy()   # [C, T]
 
             # 11) set up time axis and which series to show
-            time_axis = t_full.cpu().numpy()               # [T = t_c + t_f]
+            time_axis = torch.arange(mean_full.shape[1])              # [T = t_c + t_f]
             num_series = mean_full.shape[0]                # = C
             indices = list(range(min(10, num_series)))
 
@@ -106,6 +113,8 @@ class GPWarmStart(Callback):
                                     sharex=True)
 
             fig.suptitle(plot_title, fontsize=16)
+
+            self.info(f"Mean full shape {mean_full.shape}")
 
             for i, idx in enumerate(indices):
                 ax = axes[i]
@@ -123,7 +132,7 @@ class GPWarmStart(Callback):
                 obs_s = ctx_scaled[:, idx].cpu().numpy()     # [t_c]
                 obs = obs_s * scale0[idx].cpu().numpy() \
                     + loc0[idx].cpu().numpy()
-                ax.plot(time_axis[:t_c], obs, color="black", alpha=0.8)
+                ax.plot(time_axis[:gp.prediction_length], obs, color="black", alpha=0.8)
 
                 # overlay up to 10 sample paths
                 for k in range(min(10, combined.shape[0])):
@@ -162,8 +171,9 @@ class GPWarmStart(Callback):
         return cov
 
 
-    def compute_wasserstein_avg(self, gp, pl_module, X_fut, t_c, device):
-        gp.model.eval(); gp.likelihood.eval()
+    def compute_wasserstein_avg(self, gp, pl_module, device):
+        if pl_module.trained_prior:
+            gp.model.eval(); gp.likelihood.eval()
         wd = []
         wd_iso = []
         num_samples = 1000
@@ -171,15 +181,26 @@ class GPWarmStart(Callback):
         for data in self.train_loader:
             # — your existing preprocessing & GP sampling —
             scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = \
-                self.preprocess_input(pl_module, t_c, data, device)
+                self.preprocess_input(pl_module, data, device, pl_module.context_length, pl_module.prior_context_length)
+            
             batch_size, length, c = x1.shape
 
             # GP prior samples
-            dist = gp.gp_regression(
-                rearrange(scaled_prior_context, "b l c -> b c l"),
-                t_c
-            )
-            fut_samples = dist[0].rsample(torch.Size([num_samples]))  # [K, L_f, C]
+            if pl_module.prior_name == "Q0Dist":    
+                dist = gp.gp_regression(
+                    rearrange(scaled_prior_context, "b l c -> (b c) l"),
+                    gp.prediction_length
+                )       
+                fut_samples = dist.rsample(torch.Size([num_samples]))  # [K, L_f, C]
+                fut_samples = rearrange(fut_samples, "n c l -> n l c")
+
+            elif pl_module.prior_name == "Q0DistMultiTask":
+                dist = gp.gp_regression(
+                    rearrange(scaled_context, "b l c -> (b c) l"),
+                    gp.prediction_length
+                )
+                fut_samples = dist[0].rsample(torch.Size([num_samples]))  # [K, L_f, C]
+
 
             # repeat context
             x0_repeated = scaled_context.repeat(num_samples, 1, 1)    # [K, L_c, C]
@@ -208,7 +229,8 @@ class GPWarmStart(Callback):
         self.info(f"Wasserstein distance (isotropic prior): {avg_ws_iso:.4f}")
         self.info(f"Relative WD (GP / isotropic):           {rel_ws:.4f}")
 
-        gp.model.train(); gp.likelihood.train()
+        if pl_module.trained_prior:
+            gp.model.train(); gp.likelihood.train()
         return avg_ws, avg_ws_iso, rel_ws
 
 
@@ -216,99 +238,97 @@ class GPWarmStart(Callback):
         gp     = pl_module.q0
         device = pl_module.device
 
-        self.info(f"Device used: {device}")
-        # move GP to correct device
-        gp.model      .to(device)
-        gp.likelihood .to(device)
-
-        # 1) single optimizer over all GP params
-        all_params = {id(p): p for p in chain(gp.model.parameters(),
-                                               gp.likelihood.parameters()) if p.requires_grad}
-        
-        self.info(f"All trainable params: {all_params}")
-        # 1) collect model + likelihood named parameters
-        named = dict(gp.model.named_parameters())
-        named.update(dict(gp.likelihood.named_parameters()))
-
-        # 2) log just the names
-        param_names = list(named.keys())
-        self.info(f"GP hyperparameter names:\n" + "\n".join(param_names))
-
-        # — or if you also want shapes:
-        name_shapes = [f"{n}: {tuple(t.shape)}" for n, t in named.items()]
-        self.info("GP parameters (name : shape):\n" + "\n".join(name_shapes))
-
-        optimizer = torch.optim.Adam(list(all_params.values()), lr=self.lr)
-
-        # 3) time‐grid splits (the same for every batch/epoch)
-        t_full = gp.t.to(device)                                      # [t_c + t_f]  
-        t_c    = gp.context_length                                    # scalar
-        X_ctx  = t_full[:t_c]                                         # [t_c]
-        X_fut  = t_full[t_c:]                                         # [t_f]
-
         # ---------------------------------------------------
         # WARM-START LOOP
         # ---------------------------------------------------
         batch0 = next(iter(self.train_loader))
 
         self.plot_samples_and_context(pl_module, trainer, batch0 ,100, "GP Prior Fixed Time Kernel Only")
-        self.compute_wasserstein_avg(gp, pl_module, X_fut, t_c, device)
+        self.compute_wasserstein_avg(gp, pl_module, device)
 
-        for epoch in range(self.n_epochs):
-            epoch_loss = 0.0
+        if self.trained_prior:
+            self.info(f"Device used: {device}")
+            # move GP to correct device
+            gp.model      .to(device)
+            gp.likelihood .to(device)
 
-            for batch in self.train_loader:
+            # 1) single optimizer over all GP params
+            all_params = {id(p): p for p in chain(gp.model.parameters(),
+                                                gp.likelihood.parameters()) if p.requires_grad}
             
-                scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, t_c, batch, device)
-                batch_size, length, c = x1.shape
+            self.info(f"All trainable params: {all_params}")
+            # 1) collect model + likelihood named parameters
+            named = dict(gp.model.named_parameters())
+            named.update(dict(gp.likelihood.named_parameters()))
 
+            # 2) log just the names
+            param_names = list(named.keys())
+            self.info(f"GP hyperparameter names:\n" + "\n".join(param_names))
 
-                gp.model.train(); gp.likelihood.train()
-                optimizer.zero_grad()
+            # — or if you also want shapes:
+            name_shapes = [f"{n}: {tuple(t.shape)}" for n, t in named.items()]
+            self.info("GP parameters (name : shape):\n" + "\n".join(name_shapes))
 
-                with gpytorch.settings.fast_computations(
-                    covar_root_decomposition=False,
-                    solves=False,
-                    log_prob=False,
-                ):
-                    dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> b c l"), t_c)
-                    loss = -dist[0].log_prob(scaled_future).mean()
+            optimizer = torch.optim.Adam(list(all_params.values()), lr=self.lr)
 
-                    loss.backward()
-                    optimizer.step()
+            for epoch in range(self.n_epochs):
+                epoch_loss = 0.0
 
-                    epoch_loss += loss.item()
-
-            self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs}  loss={epoch_loss:.3f}")
-
-            emp_cov = self.estimate_empirical_covariance(scaled_context.cpu())
-            self.info(f"Empirical context covariance matrix:\n{emp_cov.numpy()}")
-
-        self.plot_samples_and_context(pl_module, trainer, batch0 , 100, "Multi Task GP Prior with Fixed Time Kernel")
-        self.compute_wasserstein_avg(gp, pl_module, X_fut, t_c, device)
-
-        # Freeze GP
-        for name, param in gp.model.named_parameters():
-            param.requires_grad_(False)
-            self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
-
-            if "covar_factor" in name:
-                # Compute full task covariance matrix
-                B_full = param @ param.T  # [num_tasks, num_tasks]
+                for batch in self.train_loader:
                 
-                # Compute correlation matrix
-                diag = torch.diag(B_full).sqrt()
-                denom = diag.unsqueeze(0) * diag.unsqueeze(1)
-                corr = B_full / (denom + 1e-8)  # add epsilon for numerical stability
+                    scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, batch, device, pl_module.context_length, pl_module.prior_context_length)
+                    batch_size, length, c = x1.shape
 
-                # Log or print
-                self.info(f"Full task covariance matrix B:\n{B_full.cpu().numpy()}")
-                self.info(f"Task correlation matrix:\n{corr.cpu().numpy()}")
 
-        self.info("Freezing GP likelihood parameters:")
-        for name, param in gp.likelihood.named_parameters():
-            param.requires_grad_(False)
-            self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
+                    gp.model.train(); gp.likelihood.train()
+                    optimizer.zero_grad()
+
+                    with gpytorch.settings.fast_computations(
+                        covar_root_decomposition=False,
+                        solves=False,
+                        log_prob=False,
+                    ):
+                        dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), gp.prediction_length)
+                        if pl_module.prior_name == "Q0Dist":
+                            loss = -dist.log_prob(rearrange(scaled_future, "b l c -> (b c) l")).mean()
+                        elif pl_module.prior_name == "Q0DistMultiTask":
+                            loss = -dist[0].log_prob(scaled_future).mean()
+
+                        loss.backward()
+                        optimizer.step()
+
+                        epoch_loss += loss.item()
+
+                self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs}  loss={epoch_loss:.3f}")
+
+                # emp_cov = self.estimate_empirical_covariance(scaled_prior_context.cpu())
+                # self.info(f"Empirical context covariance matrix:\n{emp_cov.numpy()}")
+
+            self.plot_samples_and_context(pl_module, trainer, batch0 , 100, "Multi Task GP Prior with Fixed Time Kernel")
+            self.compute_wasserstein_avg(gp, pl_module, device)
+
+            # Freeze GP
+            for name, param in gp.model.named_parameters():
+                param.requires_grad_(False)
+                self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
+
+                if "covar_factor" in name:
+                    # Compute full task covariance matrix
+                    B_full = param @ param.T  # [num_tasks, num_tasks]
+                    
+                    # Compute correlation matrix
+                    diag = torch.diag(B_full).sqrt()
+                    denom = diag.unsqueeze(0) * diag.unsqueeze(1)
+                    corr = B_full / (denom + 1e-8)  # add epsilon for numerical stability
+
+                    # Log or print
+                    self.info(f"Full task covariance matrix B:\n{B_full.cpu().numpy()}")
+                    self.info(f"Task correlation matrix:\n{corr.cpu().numpy()}")
+
+            self.info("Freezing GP likelihood parameters:")
+            for name, param in gp.likelihood.named_parameters():
+                param.requires_grad_(False)
+                self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
 
 
 

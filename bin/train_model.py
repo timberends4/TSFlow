@@ -62,6 +62,8 @@ def create_model(setting, target_dim, model_params):
         num_steps=model_params["num_steps"],
         solver=model_params["solver"],
         matching=model_params["matching"],
+        prior_name = model_params["prior_name"],
+        trained_prior=model_params["trained_prior"],
         info = info
     )
     model.to(model_params["device"])
@@ -253,7 +255,7 @@ def main(
     callbacks.append(checkpoint_callback)
 
     #Warm start GP 
-    callbacks.append(GPWarmStart(data_loader, 30, 1e-2, info))
+    callbacks.append(GPWarmStart(data_loader, 30, 1e-2, info, model_params["trained_prior"]))
     # Trainer
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else None,
@@ -337,6 +339,7 @@ if __name__ == "__main__":
         logging.info(msg)
         run.track(Text(msg), name="info")  # <- sends your text into Aim
 
+    info(str(config["model_params"]))
     # Run training + evaluation
     main(
         model=config["model"],

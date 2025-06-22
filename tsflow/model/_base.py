@@ -9,7 +9,7 @@ from torchdyn.core import NeuralODE
 from torchtyping import TensorType
 from typeguard import typechecked
 
-from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistMultiTaskApprox
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
 from tsflow.utils.optimal_transport import OTPlanSampler
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, get_lags_for_freq, get_season_length
@@ -25,6 +25,7 @@ class TSFlowBase(pl.LightningModule):
         optimizer_params: dict,
         prior_params: dict,
         frequency: str,
+        prior_name,
         matching: str = "random",
         normalization: str | None = None,
         use_lags: bool = True,
@@ -32,6 +33,7 @@ class TSFlowBase(pl.LightningModule):
         num_steps: int = 16,
         sigm: float = 0.001,
         solver: str = "euler",
+        trained_prior = False,
         info = None,
         target_dim = 0,
     ):
@@ -66,13 +68,18 @@ class TSFlowBase(pl.LightningModule):
         self.num_steps = num_steps
         self.solver = solver
         self.info = info
+
+        
+        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask}
+        prior_model = prior_model_dict.get(prior_name)
+
         self.num_samples = 1
         self.times = []
         self.sigmin = sigm
         self.sigmax = 1 if self.prior != Prior.ISO else self.sigmin
         self.target_dim = target_dim
         info(f"num_Tasks passed to Q0Dist from base function: {self.target_dim}")
-        self.q0 = Q0DistMultiTask(
+        self.q0 = prior_model(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
@@ -80,6 +87,7 @@ class TSFlowBase(pl.LightningModule):
             info = self.info,
             num_tasks = self.target_dim,
         )
+        self.trained_prior = trained_prior
 
     def _extract_features(self, data):
         raise NotImplementedError()

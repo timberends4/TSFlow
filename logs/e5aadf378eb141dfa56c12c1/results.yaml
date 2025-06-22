@@ -1,0 +1,58 @@
+config:
+  config: configs_local/train_conditional.yaml
+  dataset_params:
+    batch_size: 1
+    dataset: exchange_rate_nips
+    num_batches_per_epoch: 128
+  evaluation_params:
+    do_final_eval: true
+    eval_every: 10
+    num_samples: 100
+    use_validation_set: true
+  logdir: ./logs/e5aadf378eb141dfa56c12c1
+  model: conditional
+  model_params:
+    backbone_params:
+      dropout: 0.0
+      feature_skip: true
+      hidden_dim: 64
+      init_skip: false
+      input_dim: 1
+      num_residual_blocks: 3
+      output_dim: 1
+      residual_block: s4
+      step_emb: 64
+    context_length: 30
+    device: cuda:0
+    ema_params:
+      beta: 0.9999
+      update_after_step: 128
+      update_every: 1
+    freq: B
+    info: !!python/name:__main__.info ''
+    matching: random
+    normalization: longmean
+    num_steps: 32
+    optimizer_params:
+      lr: 0.001
+    prediction_length: 30
+    prior_params:
+      gamma: 1
+      iso: 0.001
+      kernel: ou
+    solver: euler
+    use_ema: true
+    use_lags: false
+  seed: 6433
+  setting: multivariate
+  trainer_params:
+    gradient_clip_val: 0.5
+    max_epochs: 400
+    num_sanity_val_steps: 0
+metrics:
+  test:
+    CRPS: 0.008326165339301342
+    ND: 0.0110051640299197
+    NRMSE: 0.016256906539407544
+    m_sum_CRPS: 0.006201736421811824
+version: e5aadf378eb141dfa56c12c1

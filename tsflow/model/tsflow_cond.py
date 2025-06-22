@@ -13,7 +13,7 @@ from typing import Union, List
 from tsflow.arch import BackboneModel
 # from tsflow.arch.backbones import BackboneModelMultivariate
 from tsflow.model._base import PREDICTION_INPUT_NAMES, TSFlowBase
-from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistMultiTaskApprox
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, Setting
 
@@ -38,6 +38,8 @@ class TSFlowCond(TSFlowBase):
         num_steps: int = 16,
         solver: str = "euler",
         matching: str = "random",
+        prior_name = None,
+        trained_prior = False,
         info = None,
 
     ):
@@ -54,12 +56,18 @@ class TSFlowCond(TSFlowBase):
             num_steps=num_steps,
             solver=solver,
             matching=matching,
+            prior_name=prior_name,
             info=info
         )
         num_features = 2 + (len(self.lags_seq) if use_lags else 0)
         self.info = info
         target_dim = target_dim if setting == Setting.MULTIVARIATE else 1
 
+        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask}
+        prior_model = prior_model_dict.get(prior_name)
+        self.prior_name = prior_name
+
+        info(f"prior name is {prior_name}")
         if setting == Setting.UNIVARIATE:
             self.backbone = BackboneModel(
                 **backbone_params,
@@ -83,7 +91,7 @@ class TSFlowCond(TSFlowBase):
         self.sigmax = self.sigmin
 
         info(f"Target dim passed to Q0Dist in tsflow_cond {target_dim}")
-        self.q0 = Q0DistMultiTask(
+        self.q0 = prior_model(
             **prior_params,
             prediction_length=prediction_length,
             freq=self.freq,
@@ -91,6 +99,7 @@ class TSFlowCond(TSFlowBase):
             info = info,
             num_tasks = target_dim,
         )
+        self.trained_prior = trained_prior
         self.num_tasks = target_dim
 
     @typechecked
@@ -140,21 +149,32 @@ class TSFlowCond(TSFlowBase):
                 lags = lagged_sequence_values(self.lags_seq, scaled_long_context, x1, dim=1)
                 features.append(lags)
             
-            input_gp = rearrange(scaled_prior_context, "b l c -> b c l")
+            input_gp = rearrange(scaled_prior_context, "b l c -> (b c) l")
             
-            dists = self.q0.gp_regression(input_gp, self.prediction_length)
+            if self.prior_name == "Q0Dist":
+                dist = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
 
-            fut = torch.stack([d.sample() for d in dists], dim=0)  # [B, L+pred, N]
-            fut_mean = torch.stack([d.mean for d in dists], dim=0)
-            fut_std = torch.stack([d.variance.sqrt() for d in dists], dim=0)
+                fut = rearrange(dist.sample(), "(b c) l -> b l c", c=c)
+                fut_mean = rearrange(dist.mean, "(b c) l -> b l c", c=c)
+                fut_std = torch.diagonal(dist.covariance_matrix, dim1=-2, dim2=-1)
+                fut_std = rearrange(fut_std, "(b c) ... -> b ... c", c=c)
+                features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
+                features.append(observation_mask.unsqueeze(-1))
 
-            # Take prediction part
-            fut = fut[:, -self.prediction_length:, :]
-            fut_mean = fut_mean[:, -self.prediction_length:, :]
-            fut_std = fut_std[:, -self.prediction_length:, :]
+            elif self.prior_name == "Q0DistMultiTask":
+                dists = self.q0.gp_regression(input_gp, self.prediction_length)
 
-            features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
-            features.append(observation_mask.unsqueeze(-1))
+                fut = torch.stack([d.sample() for d in dists], dim=0)  # [B, L+pred, N]
+                fut_mean = torch.stack([d.mean for d in dists], dim=0)
+                fut_std = torch.stack([d.variance.sqrt() for d in dists], dim=0)
+
+                # Take prediction part
+                fut = fut[:, -self.prediction_length:, :]
+                fut_mean = fut_mean[:, -self.prediction_length:, :]
+                fut_std = fut_std[:, -self.prediction_length:, :]
+
+                features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
+                features.append(observation_mask.unsqueeze(-1))
 
             x0 = torch.cat([scaled_context, fut], dim=-2)
 

@@ -25,14 +25,17 @@ model_params:
   matching: random
 
   device: cuda:0
-  
+  prior_name: Q0Dist
+  trained_prior: False
+    
   optimizer_params: 
-    lr: 1.e-3
+    lr: 1.e-4
 
   prior_params:
     kernel: ou
     gamma: 1
     iso: 0.001
+    context_freqs: 7
 
   ema_params: 
     beta: 0.9999
@@ -47,7 +50,7 @@ dataset_params:
 
 trainer_params:
   gradient_clip_val: .5
-  max_epochs: 100
+  max_epochs: 400
   num_sanity_val_steps: 0
 
 # Used only in callback,
@@ -58,4 +61,4 @@ evaluation_params:
   eval_every: 10
   do_final_eval: True
 
-seed: 6434
+seed: 6433
