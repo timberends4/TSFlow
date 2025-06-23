@@ -74,10 +74,16 @@ class GPWarmStart(Callback):
             # Plot & log to Aim
             scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, batch, device, pl_module.context_length, pl_module.prior_context_length)
             
-            if pl_module.prior_name == "Q0Dist":
+            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
                 dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), pl_module.prediction_length)
+
                 fut_samples = dist.rsample(torch.Size([K]))
-            
+
+                num_channels = scaled_prior_context.size(-1)
+                L = pl_module.prediction_length
+                
+                fut_samples = fut_samples.view(K, num_channels, L)
+
             elif pl_module.prior_name == "Q0DistMultiTask":
                 dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), pl_module.prediction_length)
 
@@ -140,7 +146,7 @@ class GPWarmStart(Callback):
                     ax.plot(time_axis, samp, linestyle="--", alpha=0.5)
 
                 ax.set_ylabel(f"Series {idx}")
-                ax.set_ylim(0,2)
+                # ax.set_ylim(0,2)
 
             axes[-1].set_xlabel("time")
             fig.tight_layout()
@@ -168,7 +174,16 @@ class GPWarmStart(Callback):
         X_centered = X - mean                # [N, C]
 
         cov = (X_centered.T @ X_centered) / (X_centered.shape[0] - 1)  # [C, C]
-        return cov
+        std = torch.sqrt(torch.diag(cov))       # [C]
+
+        # 4) inverse std voor normalisatie
+        inv_std = std.pow(-1)                   # [C]
+
+        # 5) bereken correlatiematrix via broadcasting
+        #    corr_{ij} = cov_{ij} * inv_std_i * inv_std_j
+        corr = cov * inv_std.unsqueeze(1) * inv_std.unsqueeze(0)  # [C, C]
+
+        return corr
 
 
     def compute_wasserstein_avg(self, gp, pl_module, device):
@@ -183,16 +198,24 @@ class GPWarmStart(Callback):
             scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = \
                 self.preprocess_input(pl_module, data, device, pl_module.context_length, pl_module.prior_context_length)
             
+
+            emp_cov = self.estimate_empirical_covariance(scaled_prior_context.cpu())
+            self.info(f"Empirical context correlation matrix:\n{emp_cov.numpy()}")
+
             batch_size, length, c = x1.shape
 
             # GP prior samples
-            if pl_module.prior_name == "Q0Dist":    
+            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):    
                 dist = gp.gp_regression(
                     rearrange(scaled_prior_context, "b l c -> (b c) l"),
                     gp.prediction_length
                 )       
+
                 fut_samples = dist.rsample(torch.Size([num_samples]))  # [K, L_f, C]
-                fut_samples = rearrange(fut_samples, "n c l -> n l c")
+                
+                num_channels = scaled_prior_context.size(-1)
+                L = pl_module.prediction_length
+                fut_samples = fut_samples.view(num_samples, L, num_channels)
 
             elif pl_module.prior_name == "Q0DistMultiTask":
                 dist = gp.gp_regression(
@@ -205,6 +228,10 @@ class GPWarmStart(Callback):
             # repeat context
             x0_repeated = scaled_context.repeat(num_samples, 1, 1)    # [K, L_c, C]
             # joint samples: [context | future]
+
+            self.info(f"Fut samples shape {fut_samples.shape}")
+            self.info(f"x0 rep shape {x0_repeated.shape}")
+
             x0_samples = torch.cat([x0_repeated, fut_samples], dim=-2) # [K, L_c+L_f, C]
 
             # compute GP‐based WD
@@ -225,9 +252,9 @@ class GPWarmStart(Callback):
         avg_ws_iso = float(np.mean(wd_iso))
         rel_ws     = avg_ws / avg_ws_iso if avg_ws_iso != 0 else float('inf')
 
-        self.info(f"Wasserstein distance (GP prior):      {avg_ws:.4f}")
+        self.info(f"Wasserstein distance (Prior):      {avg_ws:.4f}")
         self.info(f"Wasserstein distance (isotropic prior): {avg_ws_iso:.4f}")
-        self.info(f"Relative WD (GP / isotropic):           {rel_ws:.4f}")
+        self.info(f"Relative WD (Prior / isotropic prior):           {rel_ws:.4f}")
 
         if pl_module.trained_prior:
             gp.model.train(); gp.likelihood.train()
@@ -243,8 +270,9 @@ class GPWarmStart(Callback):
         # ---------------------------------------------------
         batch0 = next(iter(self.train_loader))
 
-        self.plot_samples_and_context(pl_module, trainer, batch0 ,100, "GP Prior Fixed Time Kernel Only")
+        self.plot_samples_and_context(pl_module, trainer, batch0 ,100, "Prior Fixed Time Kernel Only")
         self.compute_wasserstein_avg(gp, pl_module, device)
+
 
         if self.trained_prior:
             self.info(f"Device used: {device}")
@@ -289,7 +317,7 @@ class GPWarmStart(Callback):
                         log_prob=False,
                     ):
                         dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), gp.prediction_length)
-                        if pl_module.prior_name == "Q0Dist":
+                        if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
                             loss = -dist.log_prob(rearrange(scaled_future, "b l c -> (b c) l")).mean()
                         elif pl_module.prior_name == "Q0DistMultiTask":
                             loss = -dist[0].log_prob(scaled_future).mean()
@@ -301,8 +329,6 @@ class GPWarmStart(Callback):
 
                 self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs}  loss={epoch_loss:.3f}")
 
-                # emp_cov = self.estimate_empirical_covariance(scaled_prior_context.cpu())
-                # self.info(f"Empirical context covariance matrix:\n{emp_cov.numpy()}")
 
             self.plot_samples_and_context(pl_module, trainer, batch0 , 100, "Multi Task GP Prior with Fixed Time Kernel")
             self.compute_wasserstein_avg(gp, pl_module, device)

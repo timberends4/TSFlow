@@ -9,7 +9,7 @@ from torchdyn.core import NeuralODE
 from torchtyping import TensorType
 from typeguard import typechecked
 
-from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistKf
 from tsflow.utils.optimal_transport import OTPlanSampler
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, get_lags_for_freq, get_season_length
@@ -70,7 +70,7 @@ class TSFlowBase(pl.LightningModule):
         self.info = info
 
         
-        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask}
+        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask, "Q0DistKf": Q0DistKf}
         prior_model = prior_model_dict.get(prior_name)
 
         self.num_samples = 1

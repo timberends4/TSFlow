@@ -13,7 +13,7 @@ from typing import Union, List
 from tsflow.arch import BackboneModel
 # from tsflow.arch.backbones import BackboneModelMultivariate
 from tsflow.model._base import PREDICTION_INPUT_NAMES, TSFlowBase
-from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistKf
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, Setting
 
@@ -63,7 +63,7 @@ class TSFlowCond(TSFlowBase):
         self.info = info
         target_dim = target_dim if setting == Setting.MULTIVARIATE else 1
 
-        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask}
+        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask, "Q0DistKf": Q0DistKf}
         prior_model = prior_model_dict.get(prior_name)
         self.prior_name = prior_name
 

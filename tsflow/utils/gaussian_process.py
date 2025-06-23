@@ -29,6 +29,14 @@ def isotropic_kernel(
 ) -> TensorType[float, "length", "length"]:
     return gamma * torch.eye(t.size(0), device=t.device, dtype=t.dtype)
 
+def kronecker(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+    # A: (m, n), B: (p, q)
+    # 1) Add singleton dims so A can broadcast over B and vice-versa:
+    A2 = rearrange(A, 'i j -> i 1 j 1')    # shape (m,1,n,1), view only
+    B2 = rearrange(B, 'p q -> 1 p 1 q')    # shape (1,p,1,q), view only
+
+    # 2) Broadcast‐multiply and collapse back to (m·p, n·q):
+    return rearrange(A2 * B2, 'i p j q -> (i p) (j q)')
 
 def radial_basis_kernel(
     gamma: TensorType[float], t: TensorType[float, "length"], u: TensorType[float, "length"]
@@ -236,116 +244,190 @@ class Q0DistKf(torch.nn.Module):
         freq: int = 24,
         gamma: float = 1.0,
         iso: float = 1e-4,
-        info = None
+        info = None,
+        num_tasks = 0,
     ):
-        """
-        Initialize the GP distribution.
-
-        Args:
-            kernel (Prior): The kernel type (e.g. Prior.SE, Prior.OU, Prior.PE, etc.).
-            context_freqs (int): The number of frequency groups in the context.
-            prediction_length (int): The prediction horizon.
-            freq (int, optional): Frequency parameter for time computations. Defaults to 24.
-            gamma (float, optional): The kernel hyperparameter. Defaults to 1.0.
-            iso (float, optional): The isotropic noise level. Defaults to 1e-4.
-        """
         super().__init__()
         self.info = info
+        self.kernel = kernel
+        self.freq = freq
+        self.prediction_length = prediction_length
+        self.iso = torch.tensor(iso, dtype=torch.float64)
+        self.gamma = torch.tensor(gamma, dtype=torch.float64)
+
+        # total window = past + future
         context_length = context_freqs * prediction_length
         window_length = context_length + prediction_length
 
-        # Convert gamma to a tensor for consistency.
-        self.gamma = torch.tensor(gamma, dtype=torch.float64)
-        self.iso = torch.tensor(iso, dtype=torch.float64)
-        self.kernel = kernel
-        self.freq = freq
+        # prior mean and full GP covariance over the whole window
+        prior_loc = torch.zeros(window_length, dtype=torch.float64)
+        cov_full = get_gp(kernel, self.gamma, window_length, freq).float()
+        cov_full = cov_full + self.iso * torch.eye(window_length, dtype=torch.float64)
 
-        mean = torch.zeros(window_length)
-        cov = get_gp(kernel, self.gamma, window_length, freq) + self.iso * torch.eye(window_length)
-
-        # GP reg
-        t_obs = torch.cat([torch.ones(context_length), torch.zeros(prediction_length)]) == 1
+        # masks for observed vs. new
+        t_obs = torch.arange(window_length) < context_length
         t_new = ~t_obs
 
-        # Extract the relevant submatrices from the covariance matrix.
-        K = cov[t_obs][:, t_obs]
-        K_star = cov[t_obs][:, t_new]
-        K_star_star = cov[t_new][:, t_new]
+        # slice out K_x, K_*x, and K_** (all double)
+        K_x         = cov_full[t_obs][:, t_obs]
+        K_star_x    = cov_full[t_obs][:, t_new]
+        K_starstar = cov_full[t_new][:, t_new]
 
-        # Add a small amount of noise to the diagonal to ensure invertibility.
-        K += 1e-4 * torch.eye(K.size(0))
-        K_inv = torch.linalg.inv(K)
-        K_inv_x_K_star = K_inv @ K_star
-        cov_reg = K_star_star - K_star.T @ K_inv_x_K_star
+        # ensure invertibility & invert
+        K_x = K_x + 1e-6 * torch.eye(K_x.size(0), dtype=torch.float64)
+        K_inv_x = torch.linalg.inv(K_x)
 
-        # Register buffers
-        self.register_buffer("cov_inv", torch.linalg.inv(cov).float(), persistent=False)
-        self.register_buffer("K_inv_x_K_star", K_inv_x_K_star.float(), persistent=False)
-        self.register_buffer("cov_reg", cov_reg.float(), persistent=False)
+        # pre‐compute for regression
+        cov_reg = K_starstar - K_star_x.T @ (K_inv_x @ K_star_x)
 
-        self.dist = MV(loc=mean.float(), covariance_matrix=cov.float())
+        # register everything you need later
+        self.register_buffer("K_x",         K_x,          persistent=False)
+        self.register_buffer("K_inv_x",     K_inv_x,      persistent=False)
+        self.register_buffer("K_star_x",    K_star_x,     persistent=False)
+        self.register_buffer("K_star_star", K_starstar,   persistent=False)
+        self.register_buffer("cov_reg",     cov_reg,      persistent=False)
+
+        # the prior distribution over the full window
+        self.dist = MV(loc=prior_loc, covariance_matrix=cov_full)
 
         if self.info:
-            self.info(f"[Q0Dist] kernel={kernel}, γ={gamma}, window={context_freqs*prediction_length + prediction_length}")
-        # … build cov, K_inv, etc. …
-        if self.info:
-            self.info(f"[Q0Dist] cov built, shape={cov.shape}")
+            self.info(f"[Q0Dist] kernel={kernel}, γ={gamma}, window={window_length}")
+            self.info(f"[Q0Dist] built K_x ({K_x.shape}), K_*x {K_star_x.shape}, K_** {K_starstar.shape}")
 
     def _apply(self, fn):
         """
-        Override _apply so that when the module is moved to a new device,
-        we update our precomputed distribution (self.dist) accordingly.
+        When the module is .to(device)-ed, move our distribution tensors too.
         """
         super()._apply(fn)
-        self.dist = MV(
-            loc=self.dist.loc.to(self.cov_inv.device),
-            scale_tril=self.dist.scale_tril.to(self.cov_inv.device),
+        # Move MultivariateNormal’s loc & covariance_matrix along with the buffers:
+        self.dist = torch.distributions.MultivariateNormal(
+            loc=fn(self.dist.loc),
+            covariance_matrix=fn(self.dist.covariance_matrix),
         )
         return self
 
     def log_likelihood(self, x: TensorType[float, "batch_size", "length"]) -> TensorType[float]:
         """
-        Compute the log likelihood of the data given the GP distribution.
+        Compute negative log-prob under the prior GP over the full window.
         """
-        x = x.to(self.cov_inv.device)
+        # send to the same device as our dist parameters
+        x = x.to(self.dist.loc.device)
+        # return -log p(x)
         return -self.dist.log_prob(x)
 
     def forward(self, num_samples: int) -> TensorType[float, "num_samples", "length"]:
-        samples = self.dist.sample(torch.Size([num_samples]))
-        samples = samples.view(num_samples, self.t.shape[0], self.num_tasks)
+        """
+        Sample full trajectories from the prior GP.
+        Returns a tensor of shape [num_samples, window_length].
+        """
+        # Draw num_samples i.i.d. from MVN(loc, cov)
+        samples = self.dist.sample((num_samples,))
         return samples
 
-    def gp_regression(self, x: TensorType[float], prediction_length: int) -> MV:
+    def gp_regression(self, x: torch.Tensor, prediction_length: int):
         """
-        Perform GP regression on input data.
-
-        Args:
-            x (torch.Tensor): Input data tensor of shape [batch_size, window_length].
-            prediction_length (int): Number of prediction points.
-
-        Returns:
-            MultivariateNormal: GP regression posterior.
+        GP regression where x is [num_tasks, context_len].
+        prediction_length is L (future points per task).
         """
-        batch_size = x.size(0)
-        # Reshape x to [batch_size, num_groups, freq] for per-frequency computations.
-        x_reshaped = x.reshape(batch_size, -1, self.freq)
-        loc_freq = x_reshaped.mean(1, keepdims=False)
+        # 1) Dimensions
+        # bring to same device & dtype as our buffers
+        device = self.K_x.device
+        dtype  = self.K_x.dtype
+        x = x.to(device=device, dtype=dtype)
 
-        # For periodic kernels, set location bias to zero.
+        M, N = x.shape
+        L    = self.prediction_length
+        eps  = 1e-6
+
+        # 1) de-bias
+        loc = x.mean(dim=1, keepdim=True)             # [M,1]
         if self.kernel == Prior.PE:
-            loc_freq = torch.zeros_like(loc_freq)
+            loc.zero_()
+        Yc = x - loc                                  # [M,N]
 
-        # Remove the location bias.
-        repeat_factor = self.K_inv_x_K_star.shape[0] // self.freq
-        x_centered = x - loc_freq.repeat(1, repeat_factor)
+        # 2) task covariance with jitter
+        Kf = (Yc @ Yc.t()) / N                        # [M,M]
+        Kf = Kf + eps * torch.eye(M, device=device, dtype=dtype)
 
-        # Compute the regression mean.
-        mean = x_centered @ self.K_inv_x_K_star
-        mean = mean + loc_freq.repeat(1, prediction_length // self.freq)
+        # 3) noise diag
+        D  = torch.diag(torch.full((M,), self.iso, device=device, dtype=dtype))
 
-        # Scale the regression covariance.
-        cov = self.cov_reg
-        return MV(mean, cov)
+        # 4) build Σ = Kf⊗Kx + D⊗I_N, with jitter
+        I_N   = torch.eye(N, device=device, dtype=dtype)
+        Sigma = torch.kron(Kf, self.K_x) \
+              + torch.kron(D, I_N)
+        Sigma = Sigma + eps * torch.eye(M*N, device=device, dtype=dtype)
+
+        # 5) solve for α = Σ⁻¹ vec(Yc)
+        y_vec = Yc.t().reshape(M*N).to(dtype)
+        alpha = torch.linalg.solve(Sigma, y_vec)       # [M*N]
+
+        # 6) build cross‐covariance K_* = Kf⊗Kx_*
+        K_star = torch.kron(Kf, self.K_star_x)        # [M*N, M*L]
+
+        # 7) predictive mean
+        f_mean = K_star.t() @ alpha                   # [M*L]
+
+        # 8) predictive covariance
+        cov_star = torch.kron(Kf, self.K_star_star)   # [M*L, M*L]
+        cov_star = cov_star - K_star.t() @ torch.linalg.solve(Sigma, K_star)
+        # symmetrize + jitter
+        cov_star = 0.5 * (cov_star + cov_star.T)
+        cov_star = cov_star + eps * torch.eye(M*L, device=device, dtype=dtype)
+
+        # 9) add back loc bias into mean
+        mean = (
+            f_mean.view(M, L)             # [M, L]
+            + loc                         # [M, L]
+        ).reshape(M * L)                  # [M*L]
+
+        return MV(mean, covariance_matrix=cov_star)
+
+    # def gp_regression(self, x: TensorType[float], prediction_length: int) -> MV:
+    #     """
+    #     Perform GP regression on input data.
+
+    #     Args:
+    #         x (torch.Tensor): Input data tensor of shape [batch_size, window_length].
+    #         prediction_length (int): Number of prediction points.
+
+    #     Returns:
+    #         MultivariateNormal: GP regression posterior.
+    #     """
+    #     #assuming bs = 1
+    #     num_series = x.size(0)
+
+    #     # Reshape x to [batch_size, num_groups, freq] for per-frequency computations.
+    #     x_reshaped = x.reshape(num_series, -1, self.freq)
+    #     loc_freq = x_reshaped.mean(1, keepdims=False)
+
+    #     # For periodic kernels, set location bias to zero.
+    #     if self.kernel == Prior.PE:
+    #         loc_freq = torch.zeros_like(loc_freq)
+
+    #     # Remove the location bias.
+    #     repeat_factor = self.K_inv_x_K_star.shape[0] // self.freq
+    #     x_centered = x - loc_freq.repeat(1, repeat_factor)
+
+    #     # # Compute the regression mean.
+    #     #x: (b c) l
+    #     emp_cov_hat = 1/x.size(1) * x.T @ self.K_inv_x @ x 
+    #     K_f = emp_cov_hat
+
+    #     # Feature to possibly add is learnable noise per task instead of assuming 1 like now
+    #     sigma = kronecker(K_f, self.K_x) + torch.eye(K_f.size(0)) * self.iso
+    #     sigma_inv = torch.linalg.inv(sigma)
+
+    #     result_means = torch.zeros(num_series, self.prediction_length)
+    #     for col in num_series:
+    #         kron_k_fl_k_star_x_T = kronecker(K_f[:, col], self.K_star_x).t
+    #         result_means[:, col] = kron_k_fl_k_star_x_T @ sigma_inv @ x
+
+    #     result_means = result_means + loc_freq.repeat(1, prediction_length // self.freq)
+
+    #     return MV(mean, cov)
+
+    
 
 class Q0Dist(torch.nn.Module):
     def __init__(
@@ -433,8 +515,11 @@ class Q0Dist(torch.nn.Module):
         return -self.dist.log_prob(x)
 
     def forward(self, num_samples: int) -> TensorType[float, "num_samples", "length"]:
-        samples = self.dist.sample(torch.Size([num_samples]))
-        samples = samples.view(num_samples, self.t.shape[0], self.num_tasks)
+        fj = False
+
+        if fj == True:
+            samples = self.dist.sample(torch.Size([num_samples]))
+            samples = samples.view(num_samples, self.t.shape[0], self.num_tasks)
         return samples
 
     def gp_regression(self, x: TensorType[float], prediction_length: int) -> MV:
@@ -467,54 +552,7 @@ class Q0Dist(torch.nn.Module):
 
         # Scale the regression covariance.
         cov = self.cov_reg
+
+        self.info(f"Shape cov {cov.shape}")
+        self.info(f"Shape mean {mean.shape}")
         return MV(mean, cov)
-    
-
-class Q0Linear(torch.nn.Module):
-    def __init__(
-        self,
-        context_freqs,
-        prediction_length,
-        freq=24,
-        **kwargs,
-    ):
-        super().__init__()
-        context_length = context_freqs * prediction_length
-        self.context_length = context_length
-        self.freq = freq
-        self.mean_linear = torch.nn.Sequential(
-            torch.nn.Linear(context_length + 2 * freq, prediction_length),
-            torch.nn.ReLU(),
-            torch.nn.Linear(prediction_length, prediction_length),
-            torch.nn.ReLU(),
-            torch.nn.Linear(prediction_length, prediction_length),
-        )
-        self.cov_linear = torch.nn.Sequential(
-            torch.nn.Linear(context_length + 2 * freq, prediction_length),
-            torch.nn.ReLU(),
-            torch.nn.Linear(prediction_length, prediction_length),
-            torch.nn.ReLU(),
-            torch.nn.Linear(prediction_length, prediction_length),
-            torch.nn.Softplus(),
-        )
-
-    def regression(self, x, prediction_length):
-        loc_freq = x.reshape(x.shape[0], -1, self.freq).mean(1, keepdims=False)
-        x = x - loc_freq.repeat(1, self.context_length // self.freq)
-        std_freq = (x.reshape(x.shape[0], -1, self.freq).std(1, keepdims=False)) + 1e-4
-        x = x / std_freq.repeat(1, self.context_length // self.freq)
-        mean = self.mean_linear(torch.cat([x, loc_freq, std_freq], 1)) + loc_freq.repeat(
-            1, prediction_length // self.freq
-        )
-        cov = self.cov_linear(torch.cat([x, loc_freq, std_freq], 1))
-
-        scalar = std_freq.repeat(1, prediction_length // self.freq)
-        cov = cov[:, None] * torch.eye(prediction_length, device=x.device) * scalar.unsqueeze(-1)  # + 1e-3 * torch.eye(
-        return mean, cov
-
-
-if __name__ == "__main__":
-    a = 3
-    q0 = Q0Dist(kernel=Prior.SE, context_freqs=5, prediction_length=5, gamma=1.0)
-    breakpoint()
-    a = 5

@@ -12,10 +12,10 @@ model_params:
     init_skip: False
     feature_skip: True
 
-  freq: B
+  freq: H
   normalization: longmean
-  context_length: 30 # 360 for `D`
-  prediction_length: 30 # 30 for `D`
+  context_length: 24 # 360 for `D`
+  prediction_length: 24 # 30 for `D`
  
   use_ema: True
   use_lags: False
@@ -25,7 +25,7 @@ model_params:
   matching: random
 
   device: cuda:0
-  prior_name: Q0Dist
+  prior_name: Q0DistKf
   trained_prior: False
     
   optimizer_params: 
@@ -44,7 +44,7 @@ model_params:
 
 
 dataset_params:
-  dataset: exchange_rate_nips
+  dataset: solar_nips
   num_batches_per_epoch: 128
   batch_size: 1
 
