@@ -29,13 +29,13 @@ model_params:
   trained_prior: False
     
   optimizer_params: 
-    lr: 1.e-4
+    lr: 1.e-3
 
   prior_params:
     kernel: ou
     gamma: 1
     iso: 0.001
-    context_freqs: 7
+    context_freqs: 1
 
   ema_params: 
     beta: 0.9999
@@ -58,7 +58,7 @@ trainer_params:
 evaluation_params:
   num_samples: 100
   use_validation_set: True
-  eval_every: 10
+  eval_every: 1
   do_final_eval: True
 
 seed: 6433

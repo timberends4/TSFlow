@@ -74,7 +74,7 @@ class GPWarmStart(Callback):
             # Plot & log to Aim
             scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, batch, device, pl_module.context_length, pl_module.prior_context_length)
             
-            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
+            if pl_module.prior_name in ("Q0Dist"):
                 dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), pl_module.prediction_length)
 
                 fut_samples = dist.rsample(torch.Size([K]))
@@ -84,11 +84,15 @@ class GPWarmStart(Callback):
                 
                 fut_samples = fut_samples.view(K, num_channels, L)
 
-            elif pl_module.prior_name == "Q0DistMultiTask":
+            elif pl_module.prior_name in ("Q0DistMultiTask", "Q0DistKf"):
                 dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), pl_module.prediction_length)
 
                 fut_samples = dist[0].rsample(torch.Size([K]))
-                fut_samples = rearrange(fut_samples, "n l c -> n c l")
+
+                num_channels = scaled_prior_context.size(-1)
+                L = pl_module.prediction_length
+
+                fut_samples = fut_samples.view(K, num_channels, L)
 
             loc0   = loc[0].squeeze(0).to(device)    # [C]
             scale0 = scale[0].squeeze(0).to(device)  # [C]
@@ -120,7 +124,7 @@ class GPWarmStart(Callback):
 
             fig.suptitle(plot_title, fontsize=16)
 
-            self.info(f"Mean full shape {mean_full.shape}")
+            # self.info(f"Mean full shape {mean_full.shape}")
 
             for i, idx in enumerate(indices):
                 ax = axes[i]
@@ -199,13 +203,13 @@ class GPWarmStart(Callback):
                 self.preprocess_input(pl_module, data, device, pl_module.context_length, pl_module.prior_context_length)
             
 
-            emp_cov = self.estimate_empirical_covariance(scaled_prior_context.cpu())
-            self.info(f"Empirical context correlation matrix:\n{emp_cov.numpy()}")
+            # emp_cov = self.estimate_empirical_covariance(scaled_prior_context.cpu())
+            # self.info(f"Empirical context correlation matrix:\n{emp_cov.numpy()}")
 
             batch_size, length, c = x1.shape
 
             # GP prior samples
-            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):    
+            if pl_module.prior_name in ("Q0Dist"):    
                 dist = gp.gp_regression(
                     rearrange(scaled_prior_context, "b l c -> (b c) l"),
                     gp.prediction_length
@@ -217,20 +221,20 @@ class GPWarmStart(Callback):
                 L = pl_module.prediction_length
                 fut_samples = fut_samples.view(num_samples, L, num_channels)
 
-            elif pl_module.prior_name == "Q0DistMultiTask":
+            elif pl_module.prior_name in ("Q0DistMultiTask", "Q0DistKf"):
                 dist = gp.gp_regression(
                     rearrange(scaled_context, "b l c -> (b c) l"),
                     gp.prediction_length
                 )
                 fut_samples = dist[0].rsample(torch.Size([num_samples]))  # [K, L_f, C]
-
+                
+                num_channels = scaled_prior_context.size(-1)
+                L = pl_module.prediction_length
+                fut_samples = fut_samples.view(num_samples, L, num_channels)
 
             # repeat context
             x0_repeated = scaled_context.repeat(num_samples, 1, 1)    # [K, L_c, C]
             # joint samples: [context | future]
-
-            self.info(f"Fut samples shape {fut_samples.shape}")
-            self.info(f"x0 rep shape {x0_repeated.shape}")
 
             x0_samples = torch.cat([x0_repeated, fut_samples], dim=-2) # [K, L_c+L_f, C]
 
@@ -246,6 +250,9 @@ class GPWarmStart(Callback):
             # compute isotropic WD
             wd_iso_batch = wasserstein(x_iso_samples, x1)
             wd_iso.append(wd_iso_batch)
+
+            # break
+            
 
         # average over all batches
         avg_ws     = float(np.mean(wd))
@@ -427,7 +434,7 @@ class EvaluateCallback(Callback):
                 forecasts_pytorch = list(tqdm(forecast_it, total=len(dataset)))
                 tss_pytorch = list(ts_it)
                 metrics_pytorch, per_ts = evaluator(tss_pytorch, forecasts_pytorch)
-                metrics_pytorch["CRPS"] = metrics_pytorch["mean_wQuantileLoss"]
+                metrics_pytorch["m_sum_CRPS"] = metrics_pytorch["mean_wQuantileLoss"]
                 if pl_module.setting == Setting.UNIVARIATE:
                     plot_figures(
                         tss_pytorch[0:4],
@@ -441,8 +448,8 @@ class EvaluateCallback(Callback):
                     metrics_pytorch["m_sum_CRPS"] = metrics_pytorch[
                         "m_sum_mean_wQuantileLoss"
                     ]
-                if metrics_pytorch["CRPS"] < pl_module.best_crps and tag == "val":
-                    pl_module.best_crps = metrics_pytorch["CRPS"]
+                if metrics_pytorch["m_sum_CRPS"] < pl_module.best_crps and tag == "val":
+                    pl_module.best_crps = metrics_pytorch["m_sum_CRPS"]
                     ckpt_path = Path(self.logdir) / "best_checkpoint.ckpt"
                     torch.save(
                         pl_module.state_dict(),

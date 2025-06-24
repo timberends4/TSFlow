@@ -151,15 +151,27 @@ class TSFlowCond(TSFlowBase):
             
             input_gp = rearrange(scaled_prior_context, "b l c -> (b c) l")
             
-            if self.prior_name == "Q0Dist":
+            if self.prior_name in ("Q0Dist"):
                 dist = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
+                
+                fut = rearrange(dist.sample().view(batch_size, c, self.prediction_length), "b c l -> b l c", c=c)
+                fut_mean = rearrange(dist.mean.view(batch_size, c, self.prediction_length), "b c l -> b l c", c=c)
 
-                fut = rearrange(dist.sample(), "(b c) l -> b l c", c=c)
-                fut_mean = rearrange(dist.mean, "(b c) l -> b l c", c=c)
-                fut_std = torch.diagonal(dist.covariance_matrix, dim1=-2, dim2=-1)
-                fut_std = rearrange(fut_std, "(b c) ... -> b ... c", c=c)
                 features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
                 features.append(observation_mask.unsqueeze(-1))
+
+            elif self.prior_name == "Q0DistKf":
+                dists = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
+                
+                fut = torch.stack([d.sample() for d in dists], dim=0)  # [(B C), L]
+                fut = fut.view(batch_size, self.prediction_length, c)
+                
+                fut_mean = torch.stack([d.mean for d in dists], dim=0)
+                fut_mean = fut_mean.view(batch_size, self.prediction_length, c)
+
+                features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
+                features.append(observation_mask.unsqueeze(-1))
+
 
             elif self.prior_name == "Q0DistMultiTask":
                 dists = self.q0.gp_regression(input_gp, self.prediction_length)
@@ -167,11 +179,6 @@ class TSFlowCond(TSFlowBase):
                 fut = torch.stack([d.sample() for d in dists], dim=0)  # [B, L+pred, N]
                 fut_mean = torch.stack([d.mean for d in dists], dim=0)
                 fut_std = torch.stack([d.variance.sqrt() for d in dists], dim=0)
-
-                # Take prediction part
-                fut = fut[:, -self.prediction_length:, :]
-                fut_mean = fut_mean[:, -self.prediction_length:, :]
-                fut_std = fut_std[:, -self.prediction_length:, :]
 
                 features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
                 features.append(observation_mask.unsqueeze(-1))
