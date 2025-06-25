@@ -74,7 +74,7 @@ class GPWarmStart(Callback):
             # Plot & log to Aim
             scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, batch, device, pl_module.context_length, pl_module.prior_context_length)
             
-            if pl_module.prior_name in ("Q0Dist"):
+            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
                 dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), pl_module.prediction_length)
 
                 fut_samples = dist.rsample(torch.Size([K]))
@@ -84,7 +84,7 @@ class GPWarmStart(Callback):
                 
                 fut_samples = fut_samples.view(K, num_channels, L)
 
-            elif pl_module.prior_name in ("Q0DistMultiTask", "Q0DistKf"):
+            elif pl_module.prior_name in ("Q0DistMultiTask"):
                 dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), pl_module.prediction_length)
 
                 fut_samples = dist[0].rsample(torch.Size([K]))
@@ -209,7 +209,7 @@ class GPWarmStart(Callback):
             batch_size, length, c = x1.shape
 
             # GP prior samples
-            if pl_module.prior_name in ("Q0Dist"):    
+            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):    
                 dist = gp.gp_regression(
                     rearrange(scaled_prior_context, "b l c -> (b c) l"),
                     gp.prediction_length
@@ -221,7 +221,7 @@ class GPWarmStart(Callback):
                 L = pl_module.prediction_length
                 fut_samples = fut_samples.view(num_samples, L, num_channels)
 
-            elif pl_module.prior_name in ("Q0DistMultiTask", "Q0DistKf"):
+            elif pl_module.prior_name in ("Q0DistMultiTask"):
                 dist = gp.gp_regression(
                     rearrange(scaled_context, "b l c -> (b c) l"),
                     gp.prediction_length
@@ -276,6 +276,39 @@ class GPWarmStart(Callback):
         # WARM-START LOOP
         # ---------------------------------------------------
         batch0 = next(iter(self.train_loader))
+
+        if pl_module.prior_name == "Q0DistKf":
+            device, dtype = gp.K_x.device, gp.K_x.dtype
+
+            all_Y = []
+
+            for batch in self.train_loader:
+                # 1) get [B, N, C]
+                scaled_prior_context, *_ = self.preprocess_input(
+                    pl_module, batch, device,
+                    pl_module.context_length,
+                    pl_module.prior_context_length,
+                )  # shape [B, N, C]
+
+                # 2) flatten time & batch dims → [B*N, C]
+                X = rearrange(scaled_prior_context, "b n c -> (b n) c")
+
+                # 3) de-bias per column (task)
+                mean = X.mean(dim=0, keepdim=True)   # [1, C]
+                Yc  = X - mean                       # [B*N, C]
+
+                all_Y.append(Yc)
+
+            # 4) concatenate all windows → [T, C], where T = sum_b (B*N)
+            Y = torch.cat(all_Y, dim=0).to(device=device, dtype=dtype)  # [T, C]
+
+            # 5) empirical covariance of shape [C, C]
+            #    (we use 1/T so it matches the paper’s 1/N for each window)
+            T = Y.shape[0]
+            Kf = (Y.T @ Y) / T   # → [C, C]
+
+            # 6) warm‐start the GP module with that C×C matrix
+            gp.set_task_kernel(Kf)
 
         self.plot_samples_and_context(pl_module, trainer, batch0 ,100, "Prior Fixed Time Kernel Only")
         self.compute_wasserstein_avg(gp, pl_module, device)
@@ -385,16 +418,10 @@ class EvaluateCallback(Callback):
         self.datasets = datasets
         self.logdir = logdir
         self.eval_every = eval_every
-        self.log_metrics = (
-            {
-                "CRPS",
-                "ND",
-                "NRMSE",
-                "m_sum_CRPS",
-            }
-            if model.setting == Setting.MULTIVARIATE
-            else {"CRPS", "ND", "NRMSE"}
-        )
+        if model.setting == Setting.UNIVARIATE:
+            self.log_metrics = {"CRPS", "ND", "NRMSE"}
+        else:  # MULTIVARIATE
+            self.log_metrics = {"m_sum_CRPS", "ND", "NRMSE"}
 
     def on_train_epoch_end(self, trainer, pl_module):
         if (pl_module.current_epoch + 1) % self.eval_every == 0:

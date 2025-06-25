@@ -25,7 +25,7 @@ model_params:
   matching: random
 
   device: cuda:0
-  prior_name: Q0DistKf
+  prior_name: Q0Dist
   trained_prior: False
     
   optimizer_params: 
@@ -56,9 +56,9 @@ trainer_params:
 # Used only in callback,
 # the final evaluation uses 100 samples
 evaluation_params:
-  num_samples: 100
+  num_samples: 16
   use_validation_set: True
-  eval_every: 1
+  eval_every: 10
   do_final_eval: True
 
 seed: 6433

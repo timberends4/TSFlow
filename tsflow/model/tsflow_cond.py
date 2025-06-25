@@ -151,7 +151,7 @@ class TSFlowCond(TSFlowBase):
             
             input_gp = rearrange(scaled_prior_context, "b l c -> (b c) l")
             
-            if self.prior_name in ("Q0Dist"):
+            if self.prior_name in ("Q0Dist", "Q0DistKf"):
                 dist = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
                 
                 fut = rearrange(dist.sample().view(batch_size, c, self.prediction_length), "b c l -> b l c", c=c)
@@ -160,17 +160,17 @@ class TSFlowCond(TSFlowBase):
                 features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
                 features.append(observation_mask.unsqueeze(-1))
 
-            elif self.prior_name == "Q0DistKf":
-                dists = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
+            # elif self.prior_name == "Q0DistKf":
+            #     dists = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
                 
-                fut = torch.stack([d.sample() for d in dists], dim=0)  # [(B C), L]
-                fut = fut.view(batch_size, self.prediction_length, c)
+            #     fut = torch.stack([d.sample() for d in dists], dim=0)  # [(B C), L]
+            #     fut = fut.view(batch_size, self.prediction_length, c)
                 
-                fut_mean = torch.stack([d.mean for d in dists], dim=0)
-                fut_mean = fut_mean.view(batch_size, self.prediction_length, c)
+            #     fut_mean = torch.stack([d.mean for d in dists], dim=0)
+            #     fut_mean = fut_mean.view(batch_size, self.prediction_length, c)
 
-                features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
-                features.append(observation_mask.unsqueeze(-1))
+            #     features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
+            #     features.append(observation_mask.unsqueeze(-1))
 
 
             elif self.prior_name == "Q0DistMultiTask":
