@@ -8,7 +8,7 @@ model_params:
 
 trainer_params:
   gradient_clip_val: 0.5
-  max_epochs: 400
+  max_epochs: 20
   num_sanity_val_steps: 0
 
 

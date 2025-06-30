@@ -278,7 +278,7 @@ class GPWarmStart(Callback):
         batch0 = next(iter(self.train_loader))
 
         if pl_module.prior_name == "Q0DistKf":
-            device, dtype = gp.K_x.device, gp.K_x.dtype
+            device, dtype = gp.kx_row.device, gp.kx_row.dtype
 
             all_Y = []
 
