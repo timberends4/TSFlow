@@ -174,7 +174,7 @@ class TSFlowCond(TSFlowBase):
 
 
             elif self.prior_name == "Q0DistMultiTask":
-                dists = self.q0.gp_regression(input_gp, self.prediction_length)
+                dists = self.q0.gp_regression(input_gp, self.prediction_length, self.context_length)
 
                 fut = torch.stack([d.sample() for d in dists], dim=0)  # [B, L+pred, N]
                 fut_mean = torch.stack([d.mean for d in dists], dim=0)

@@ -74,6 +74,8 @@ class GPWarmStart(Callback):
             # Plot & log to Aim
             scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, batch, device, pl_module.context_length, pl_module.prior_context_length)
             
+            self.info(f"Context length : {pl_module.context_length}")
+
             if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
                 dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), pl_module.prediction_length)
 
@@ -85,7 +87,7 @@ class GPWarmStart(Callback):
                 fut_samples = fut_samples.view(K, num_channels, L)
 
             elif pl_module.prior_name in ("Q0DistMultiTask"):
-                dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), pl_module.prediction_length)
+                dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), pl_module.prediction_length, pl_module.context_length)
 
                 fut_samples = dist[0].rsample(torch.Size([K]))
 
@@ -223,8 +225,8 @@ class GPWarmStart(Callback):
 
             elif pl_module.prior_name in ("Q0DistMultiTask"):
                 dist = gp.gp_regression(
-                    rearrange(scaled_context, "b l c -> (b c) l"),
-                    gp.prediction_length
+                    rearrange(scaled_prior_context, "b l c -> (b c) l"),
+                    gp.prediction_length, pl_module.context_length
                 )
                 fut_samples = dist[0].rsample(torch.Size([num_samples]))  # [K, L_f, C]
                 
@@ -356,7 +358,7 @@ class GPWarmStart(Callback):
                         solves=False,
                         log_prob=False,
                     ):
-                        dist = gp.gp_regression(rearrange(scaled_context, "b l c -> (b c) l"), gp.prediction_length)
+                        dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), gp.prediction_length, pl_module.context_length)
                         if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
                             loss = -dist.log_prob(rearrange(scaled_future, "b l c -> (b c) l")).mean()
                         elif pl_module.prior_name == "Q0DistMultiTask":

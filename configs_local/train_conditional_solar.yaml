@@ -17,7 +17,7 @@ model_params:
   context_length: 24 # 360 for `D`
   prediction_length: 24 # 30 for `D`
  
-  use_ema: True
+  use_ema: False
   use_lags: False
   
   num_steps: 32
@@ -25,8 +25,8 @@ model_params:
   matching: random
 
   device: cuda:0
-  prior_name: Q0DistMultiTask
-  trained_prior: True
+  prior_name: Q0Dist
+  trained_prior: False
     
   optimizer_params: 
     lr: 1.e-3

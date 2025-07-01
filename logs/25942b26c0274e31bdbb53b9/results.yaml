@@ -1,0 +1,61 @@
+config:
+  config: configs_local/train_conditional_exchange.yaml
+  dataset_params:
+    batch_size: 1
+    dataset: exchange_rate_nips
+    num_batches_per_epoch: 128
+  evaluation_params:
+    do_final_eval: true
+    eval_every: 20
+    num_samples: 20
+    use_validation_set: true
+  logdir: ./logs/25942b26c0274e31bdbb53b9
+  model: conditional
+  model_params:
+    backbone_params:
+      dropout: 0.0
+      feature_skip: true
+      hidden_dim: 64
+      init_skip: false
+      input_dim: 1
+      num_residual_blocks: 3
+      output_dim: 1
+      residual_block: s4
+      step_emb: 64
+    context_length: 30
+    device: cuda:0
+    ema_params:
+      beta: 0.9999
+      update_after_step: 128
+      update_every: 1
+    freq: D
+    info: !!python/name:__main__.info ''
+    matching: random
+    normalization: longmean
+    num_steps: 32
+    optimizer_params:
+      lr: 0.0001
+    prediction_length: 30
+    prior_name: Q0DistMultiTask
+    prior_params:
+      context_freqs: 7
+      gamma: 1
+      iso: 0.001
+      kernel: ou
+    solver: euler
+    trained_prior: true
+    use_ema: false
+    use_lags: false
+  seed: 6433
+  setting: multivariate
+  trainer_params:
+    gradient_clip_val: 0.5
+    max_epochs: 400
+    num_sanity_val_steps: 0
+metrics:
+  test:
+    CRPS: 0.008186508433805008
+    ND: 0.010607658258054665
+    NRMSE: 0.01575001611869462
+    m_sum_CRPS: 0.00594111022460707
+version: 25942b26c0274e31bdbb53b9

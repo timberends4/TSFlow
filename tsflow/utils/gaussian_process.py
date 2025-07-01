@@ -282,7 +282,7 @@ class Q0DistMultiTask(torch.nn.Module):
         self.likelihood.raw_noise.requires_grad_(False)
         self.likelihood.task_noises = torch.full(
             (self.num_tasks,), self.iso, device=device)
-        self.likelihood.raw_task_noises.requires_grad_(False)
+        # self.likelihood.raw_task_noises.requires_grad_(False)
 
         # SKI ExactGP definition
         class SKIGP(ExactGP):
@@ -293,7 +293,7 @@ class Q0DistMultiTask(torch.nn.Module):
                 )
                 base_kernel = MaternKernel(nu=0.5)
                 base_kernel.lengthscale = self.gamma
-                base_kernel.raw_lengthscale.requires_grad_(False)
+                # base_kernel.raw_lengthscale.requires_grad_(False)
                 grid_size = 2 ** math.ceil(math.log2(train_x.size(0)))
                 grid_bounds = [(train_x.min().item(), train_x.max().item())]
                 ski_kernel = GridInterpolationKernel(
@@ -329,7 +329,8 @@ class Q0DistMultiTask(torch.nn.Module):
     def gp_regression(
         self,
         x: TensorType[float, "B", "C", "L"],
-        prediction_length: int
+        prediction_length: int,
+        context_points:int = 0,
     ) -> List[MultitaskMultivariateNormal]:
         """
         Condition on exactly the provided context length L and predict the next prediction_length points.
@@ -342,16 +343,14 @@ class Q0DistMultiTask(torch.nn.Module):
             x = x.reshape(B, self.num_tasks, -1)
 
         B, C, L = x.shape
-        assert L == self.prior_context_length, \
-            f"Expected context length {self.prior_context_length}, got {L}"
-
+        
         F = self.freq
         # seasonal parameters
         G_ctx = L // F
         rem_ctx = L % F
 
         # time tensors
-        t_ctx = self.t[:L].unsqueeze(-1)
+        t_ctx = self.t[L-context_points:L].unsqueeze(-1)
         t_fut = self.t[L:L + prediction_length].unsqueeze(-1)
 
         results: List[MultitaskMultivariateNormal] = []
@@ -375,7 +374,7 @@ class Q0DistMultiTask(torch.nn.Module):
             y_ctx = (x_ctx - loc_ctx).transpose(0,1)
 
             # update GP train data with exactly L context observations
-            self.model.set_train_data(inputs=t_ctx, targets=y_ctx, strict=False)
+            self.model.set_train_data(inputs=t_ctx, targets=y_ctx[L-context_points:], strict=False)
             self.model.eval(); self.likelihood.eval()
 
             # predict next points
