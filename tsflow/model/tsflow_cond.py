@@ -11,7 +11,8 @@ from typeguard import typechecked
 from typing import Union, List
 
 from tsflow.arch import BackboneModel
-# from tsflow.arch.backbones import BackboneModelMultivariate
+from tsflow.arch.backbones import BackboneModelMultivariate
+
 from tsflow.model._base import PREDICTION_INPUT_NAMES, TSFlowBase
 from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistKf
 from tsflow.utils.util import LongScaler
@@ -75,16 +76,16 @@ class TSFlowCond(TSFlowBase):
                 target_dim=target_dim,
             )
         else:
-            self.backbone = BackboneModel(
-                **backbone_params,
-                num_features=num_features,
-                target_dim=target_dim,
-            )
-            # self.backbone = BackboneModelMultivariate(
+            # self.backbone = BackboneModel(
             #     **backbone_params,
             #     num_features=num_features,
             #     target_dim=target_dim,
             # )
+            self.backbone = BackboneModelMultivariate(
+                **backbone_params,
+                num_features=num_features,
+                target_dim=target_dim,
+            )
         self.ema_backbone = EMA(self.backbone, **ema_params)
         self.setting = setting
         self.guidance_scale = 0
