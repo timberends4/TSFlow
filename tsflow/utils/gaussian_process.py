@@ -281,8 +281,8 @@ class Q0DistMultiTask(torch.nn.Module):
         self.likelihood.noise = torch.tensor(self.iso, device=device)
         self.likelihood.raw_noise.requires_grad_(False)
         self.likelihood.task_noises = torch.full(
-            (self.num_tasks,), self.iso, device=device)
-        # self.likelihood.raw_task_noises.requires_grad_(False)
+            (self.num_tasks,), 1, device=device)
+        self.likelihood.raw_task_noises.requires_grad_(False)
 
         # SKI ExactGP definition
         class SKIGP(ExactGP):
@@ -293,7 +293,8 @@ class Q0DistMultiTask(torch.nn.Module):
                 )
                 base_kernel = MaternKernel(nu=0.5)
                 base_kernel.lengthscale = self.gamma
-                # base_kernel.raw_lengthscale.requires_grad_(False)
+                base_kernel.raw_lengthscale.requires_grad_(False)
+                
                 grid_size = 2 ** math.ceil(math.log2(train_x.size(0)))
                 grid_bounds = [(train_x.min().item(), train_x.max().item())]
                 ski_kernel = GridInterpolationKernel(
@@ -376,7 +377,7 @@ class Q0DistMultiTask(torch.nn.Module):
             # update GP train data with exactly L context observations
             self.model.set_train_data(inputs=t_ctx, targets=y_ctx[L-context_points:], strict=False)
             self.model.eval(); self.likelihood.eval()
-
+            
             # predict next points
             f_fut = self.model(t_fut)
             y_fut = self.likelihood(f_fut)

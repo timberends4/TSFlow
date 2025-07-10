@@ -3,6 +3,7 @@ import logging
 import sys
 import tempfile
 from pathlib import Path
+from pytorch_lightning import Callback
 
 import numpy as np
 import pykeops
@@ -255,7 +256,16 @@ def main(
     callbacks.append(checkpoint_callback)
 
     #Warm start GP 
-    callbacks.append(GPWarmStart(data_loader, 5, 1e-2, info, model_params["trained_prior"]))
+    gp_callback = GPWarmStart(data_loader,
+                          n_epochs=17,
+                          lr=1e-2,
+                          info=info,
+                          trained_prior=model_params["trained_prior"])
+
+    # if model_params["trained_prior"]:
+    #     gp_callback._do_warm_start(model)
+       
+    callbacks.append(gp_callback)
     # Trainer
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else None,

@@ -65,7 +65,7 @@ class DiffusionEmbedding(nn.Module):
 
 
 class diff_CSDI(nn.Module):
-    def __init__(self, config, inputdim=2):
+    def __init__(self, config, inputdim=1):
         super().__init__()
         self.channels = config["channels"]
 
@@ -159,10 +159,22 @@ class ResidualBlock(nn.Module):
         base_shape = x.shape
         x = x.reshape(B, channel, K * L)
 
-        # diffusion_emb = self.diffusion_projection(diffusion_emb).unsqueeze(-1)  # (B,channel,1)
+        if diffusion_emb.ndim == 3:
+            diffusion_emb = diffusion_emb.squeeze(1 if diffusion_emb.shape[1] == 1 else 2)
+        # Now we must have exactly [B,C]
+        assert diffusion_emb.ndim == 2 and diffusion_emb.shape == (B, channel), \
+            f"diffusion_emb must be [B,C], got {tuple(diffusion_emb.shape)}"
+
+        # Unsqueeze on the *last* axis → [B,C,1]
         diffusion_emb = diffusion_emb.unsqueeze(-1)
+        assert diffusion_emb.shape == (B, channel, 1), \
+            f"after unsqueeze, diffusion_emb must be [B,C,1], got {tuple(diffusion_emb.shape)}"
+        
         y = x + diffusion_emb
 
+        assert y.shape == (B, channel, K * L), \
+            f"y must be [B,C,K*L] before forward_time, got {tuple(y.shape)}"
+        
         y = self.forward_time(y, base_shape)
         y = self.forward_feature(y, base_shape)  # (B,channel,K*L)
         y = self.mid_projection(y)  # (B,2*channel,K*L)
@@ -433,7 +445,7 @@ class BackboneModelMultivariate(nn.Module):
             residual_block = S4Block
         else:
             raise ValueError(f"Unknown residual block {residual_block}")
-        self.input_init = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
+        self.input_init = nn.Sequential(nn.Linear(1, hidden_dim), nn.ReLU())
 
         self.time_init = nn.Sequential(
             nn.Linear(step_emb, hidden_dim),
@@ -475,7 +487,7 @@ class BackboneModelMultivariate(nn.Module):
         self.total_emb = hidden_dim * 2
         config_trans = {"layers": 4, "channels": hidden_dim, "nheads": 8, "diffusion_embedding_dim": hidden_dim, "num_steps": 50, "is_linear": False, "side_dim":self.total_emb}
 
-        self.transformer_model = diff_CSDI(config_trans, input_dim)
+        self.transformer_model = diff_CSDI(config_trans, inputdim=1)
 
     @typechecked
     def forward(
@@ -485,60 +497,94 @@ class BackboneModelMultivariate(nn.Module):
         features: TensorType[float, "batch", "length", "num_series", "num_features"] | None = None,
         args: dict | None = None,
     ) -> TensorType[float, "batch", "length", "num_series"]:
-        B, L, K = x_in.shape
 
-        # 2) Build time embeddings
-        if len(t.shape) == 0:
+        # unpack
+        B, L, K = x_in.shape
+        assert x_in.ndim == 3, f"x_in must be 3-D [B,L,K], got {tuple(x_in.shape)}"
+
+        # 1) Build time embeddings
+        if t.ndim == 0:
             t_in = repeat(t, " -> b 1", b=B)
         else:
             t_in = t[..., 0]
+        t_emb = self.step_embedding(t_in * 10000)  # [B, H]
+        t_emb = self.time_init(t_emb)             # [B, H, 1]
+        # assert t_emb.shape == (B, t_emb.shape[-1]), f"t_emb shape wrong: {tuple(t_emb.shape)}"
 
-        t_emb = self.step_embedding(t_in * 10000)  # (B, hidden_dim)
-        t_emb = self.time_init(t_emb)             # (B, hidden_dim)
-
-        # 3) Build cond_info for transformer
+        # 2) Build cond_info for transformer
         cond_feats = []
         if features is not None:
-            # features: (B, L, K, C_feat)
-            f = features.permute(0, 3, 2, 1)      # → (B, C_feat, K, L)
+            # features: [B,L,K,F] → [B,F,K,L]
+            f = features.permute(0, 3, 2, 1)
+            assert f.shape == (B, features.shape[3], K, L), f"permute features→{tuple(f.shape)}"
             cond_feats.append(f)
 
         if self.feature_skip:
-            m = x_in.unsqueeze(-1).permute(0, 3, 2, 1)  # → (B, 1, K, L)
+            # x_in: [B,L,K] → [B,L,K,1] → permute to [B,1,K,L]
+            m = x_in.unsqueeze(-1).permute(0, 3, 2, 1)
+            assert m.shape == (B, 1, K, L), f"mask feats m shape wrong: {tuple(m.shape)}"
             cond_feats.append(m)
 
-        cond_info = torch.cat(cond_feats, dim=1)      # (B, C_cond, K, L)
-        cond_info = self.cond_proj(cond_info)         # (B, side_dim, K, L)
+        cond_info = torch.cat(cond_feats, dim=1)      # [B, C_cond, K, L]
+        assert cond_info.ndim == 4 and cond_info.shape[0] == B, f"cond_info wrong: {tuple(cond_info.shape)}"
+        cond_info = self.cond_proj(cond_info)         # [B, side_dim, K, L]
+        assert cond_info.ndim == 4, f"cond_proj output wrong: {tuple(cond_info.shape)}"
 
-        # 4) Run transformer block on series dimension
-        x_for_trans = x_in.transpose(1, 2).unsqueeze(1)  # (B, 1, K, L)
-        transformed = self.transformer_model(x_for_trans, cond_info, t_emb)  # (B, K, L)
+        # 3) Run transformer block on series dimension
+        # x_for_trans: [B,1,K,L]
+        x_for_trans = x_in.permute(0, 2, 1).unsqueeze(1)
+        assert x_for_trans.shape == (B, 1, K, L), f"x_for_trans wrong: {tuple(x_for_trans.shape)}"
+        transformed = self.transformer_model(x_for_trans, cond_info, t_emb)  # [B, K, L]
+        assert transformed.shape == (B, K, L), f"transformer output wrong: {tuple(transformed.shape)}"
 
-        # 5) Incorporate transformer output as new feature
-        new_feats = transformed.transpose(1, 2).unsqueeze(-1)  # (B, L, K, 1)
-        new_feats = new_feats.permute(0, 3, 2, 1)
+        # 4) Incorporate transformer output as new feature
+        new_feats = transformed.unsqueeze(1)  # [B,1,K,L]
+        assert new_feats.shape == (B, 1, K, L), f"new_feats wrong: {tuple(new_feats.shape)}"
 
+        # 5) Series positional embeddings
         feat_embeddings = repeat(
-             self.feature_embedd(torch.arange(K, device=features.device)),
-             "K C -> B C K L",
-             B=B, L=L,
-         )
-        
-        features = torch.cat([new_feats, feat_embeddings], dim=1)
-        # 6) Univariate S4/residual blocks on x
-        x = self.input_init(x_in.unsqueeze(-1))  # (B, L, hidden_dim, 1)
-        x = x.transpose(-1, 1)                   # (B, hidden_dim, K, L)
-        skips = []
+            self.feature_embedd(torch.arange(K, device=x_in.device)),
+            "K C -> B C K L",
+            B=B, L=L,
+        )
+        assert feat_embeddings.shape == (B, self.feature_embedd.embedding_dim, K, L), \
+            f"feat_embeddings wrong: {tuple(feat_embeddings.shape)}"
 
-        for layer in self.residual_blocks:
+        features = torch.cat([new_feats, feat_embeddings], dim=1)  # [B, 1+emb_dim, K, L]
+        assert features.ndim == 4 and features.shape[2] == K and features.shape[3] == L, \
+            f"features for S4 wrong: {tuple(features.shape)}"
+
+        # 6) Univariate S4/residual blocks on x
+        x = x_in.unsqueeze(-1)          # [B, L, K, 1]
+        assert x.shape == (B, L, K, 1), f"x before input_init wrong: {tuple(x.shape)}"
+        x = self.input_init(x)          # [B, L, K, H]
+        assert x.ndim == 4 and x.shape[3] == self.input_init[0].out_features, \
+            f"x after input_init wrong: {tuple(x.shape)}"
+        x = x.permute(0, 3, 2, 1)       # [B, H, K, L]
+        assert x.shape == (B, x.shape[1], K, L), f"x permuted wrong: {tuple(x.shape)}"
+
+        # 7) Residual‐S4 stack
+        skips = []
+        for i, layer in enumerate(self.residual_blocks):
             x, skip = layer(x, t_emb, features)
+            assert x.ndim == 4 and skip.ndim == 4, \
+                f"layer {i} outputs wrong dims: x={tuple(x.shape)}, skip={tuple(skip.shape)}"
+            assert x.shape[2:] == (K, L) and skip.shape[2:] == (K, L), \
+                f"layer {i} outputs wrong K/L: x={tuple(x.shape)}, skip={tuple(skip.shape)}"
             skips.append(skip)
 
-        skip_sum = torch.stack(skips).sum(0)                      # (B, hidden_dim, K, L)
-        skip_sum = rearrange(skip_sum, "b c k l -> b l k c")     # (B, L, K, hidden_dim)
-        out = self.out_linear(skip_sum)[..., 0]                   # (B, L, K)
+        # 8) Sum & final readout
+        skip_sum = torch.stack(skips).sum(0)  # [B, H, K, L]
+        assert skip_sum.shape == (B, skip_sum.shape[1], K, L), f"skip_sum wrong: {tuple(skip_sum.shape)}"
+        skip_sum = rearrange(skip_sum, "b c k l -> b l k c")  # [B, L, K, H]
+        assert skip_sum.shape == (B, L, K, skip_sum.shape[3]), \
+            f"skip_sum rearrange wrong: {tuple(skip_sum.shape)}"
+        out = self.out_linear(skip_sum)[..., 0]  # [B, L, K]
+        assert out.shape == (B, L, K), f"out wrong: {tuple(out.shape)}"
 
+        # 9) Optional initial skip
         if self.init_skip:
             out = out - x_in
+            assert out.shape == (B, L, K), f"out after init_skip wrong: {tuple(out.shape)}"
 
         return out

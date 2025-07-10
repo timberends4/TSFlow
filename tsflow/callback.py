@@ -312,8 +312,8 @@ class GPWarmStart(Callback):
             # 6) warm‐start the GP module with that C×C matrix
             gp.set_task_kernel(Kf)
 
-        self.plot_samples_and_context(pl_module, trainer, batch0 ,100, "Prior Fixed Time Kernel Only")
-        self.compute_wasserstein_avg(gp, pl_module, device)
+        # self.plot_samples_and_context(pl_module, trainer, batch0 ,100, "Prior Fixed Time Kernel Only")
+        # self.compute_wasserstein_avg(gp, pl_module, device)
 
 
         if self.trained_prior:
@@ -371,10 +371,6 @@ class GPWarmStart(Callback):
 
                 self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs}  loss={epoch_loss:.3f}")
 
-
-            self.plot_samples_and_context(pl_module, trainer, batch0 , 100, "Multi Task GP Prior with Fixed Time Kernel")
-            self.compute_wasserstein_avg(gp, pl_module, device)
-
             # Freeze GP
             for name, param in gp.model.named_parameters():
                 param.requires_grad_(False)
@@ -398,6 +394,11 @@ class GPWarmStart(Callback):
                 param.requires_grad_(False)
                 self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
 
+            optimizer.zero_grad()
+            gp.model.eval(); gp.likelihood.eval()
+
+        # self.plot_samples_and_context(pl_module, trainer, batch0 , 100, "Multi Task GP Prior with Fixed Time Kernel")
+            # self.compute_wasserstein_avg(gp, pl_module, device)
 
 
 class EvaluateCallback(Callback):

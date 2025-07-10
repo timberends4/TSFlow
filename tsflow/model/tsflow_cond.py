@@ -177,9 +177,8 @@ class TSFlowCond(TSFlowBase):
             elif self.prior_name == "Q0DistMultiTask":
                 dists = self.q0.gp_regression(input_gp, self.prediction_length, self.context_length)
 
-                fut = torch.stack([d.sample() for d in dists], dim=0)  # [B, L+pred, N]
-                fut_mean = torch.stack([d.mean for d in dists], dim=0)
-                fut_std = torch.stack([d.variance.sqrt() for d in dists], dim=0)
+                fut = torch.stack([d.sample() for d in dists], dim=0).detach()  # [B, L+pred, N]
+                fut_mean = torch.stack([d.mean for d in dists], dim=0).detach()
 
                 features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
                 features.append(observation_mask.unsqueeze(-1))
@@ -212,6 +211,7 @@ class TSFlowCond(TSFlowBase):
         )
         return {"loss": loss}
 
+    
     @typechecked
     def forward(
         self,
