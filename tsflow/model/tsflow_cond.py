@@ -11,10 +11,9 @@ from typeguard import typechecked
 from typing import Union, List
 
 from tsflow.arch import BackboneModel
-from tsflow.arch.backbones import BackboneModelMultivariate
 
 from tsflow.model._base import PREDICTION_INPUT_NAMES, TSFlowBase
-from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask, Q0DistKf
+from tsflow.utils.gaussian_process import Q0Dist, Q0DistMultiTask
 from tsflow.utils.util import LongScaler
 from tsflow.utils.variables import Prior, Setting
 
@@ -64,7 +63,7 @@ class TSFlowCond(TSFlowBase):
         self.info = info
         target_dim = target_dim if setting == Setting.MULTIVARIATE else 1
 
-        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask, "Q0DistKf": Q0DistKf}
+        prior_model_dict = {"Q0Dist": Q0Dist, "Q0DistMultiTask": Q0DistMultiTask}
         prior_model = prior_model_dict.get(prior_name)
         self.prior_name = prior_name
 
@@ -76,16 +75,12 @@ class TSFlowCond(TSFlowBase):
                 target_dim=target_dim,
             )
         else:
-            # self.backbone = BackboneModel(
-            #     **backbone_params,
-            #     num_features=num_features,
-            #     target_dim=target_dim,
-            # )
-            self.backbone = BackboneModelMultivariate(
+            self.backbone = BackboneModel(
                 **backbone_params,
                 num_features=num_features,
                 target_dim=target_dim,
             )
+
         self.ema_backbone = EMA(self.backbone, **ema_params)
         self.setting = setting
         self.guidance_scale = 0
@@ -150,7 +145,7 @@ class TSFlowCond(TSFlowBase):
                 lags = lagged_sequence_values(self.lags_seq, scaled_long_context, x1, dim=1)
                 features.append(lags)
             
-            input_gp = rearrange(scaled_prior_context, "b l c -> (b c) l")
+            input_gp = rearrange(scaled_prior_context, "b l c -> b c l")
             
             if self.prior_name in ("Q0Dist", "Q0DistKf"):
                 dist = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
@@ -161,24 +156,12 @@ class TSFlowCond(TSFlowBase):
                 features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
                 features.append(observation_mask.unsqueeze(-1))
 
-            # elif self.prior_name == "Q0DistKf":
-            #     dists = self.q0.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), self.prediction_length)
-                
-            #     fut = torch.stack([d.sample() for d in dists], dim=0)  # [(B C), L]
-            #     fut = fut.view(batch_size, self.prediction_length, c)
-                
-            #     fut_mean = torch.stack([d.mean for d in dists], dim=0)
-            #     fut_mean = fut_mean.view(batch_size, self.prediction_length, c)
-
-            #     features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
-            #     features.append(observation_mask.unsqueeze(-1))
-
 
             elif self.prior_name == "Q0DistMultiTask":
-                dists = self.q0.gp_regression(input_gp, self.prediction_length, self.context_length)
+                dist = self.q0.gp_regression(input_gp, self.prediction_length, self.context_length)
 
-                fut = torch.stack([d.sample() for d in dists], dim=0).detach()  # [B, L+pred, N]
-                fut_mean = torch.stack([d.mean for d in dists], dim=0).detach()
+                fut = dist.sample().detach()  # [B, L+pred, N]
+                fut_mean = dist.mean.detach()
 
                 features.append(torch.cat([scaled_context, fut_mean], dim=-2).unsqueeze(-1))
                 features.append(observation_mask.unsqueeze(-1))

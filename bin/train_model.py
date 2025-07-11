@@ -153,7 +153,7 @@ def main(
     prediction_length = model_params["prediction_length"]
 
     dataset = get_gts_dataset(dataset_name)
-    target_dim = min(2000, int(dataset.metadata.feat_static_cat[0].cardinality))
+    target_dim = min(10, int(dataset.metadata.feat_static_cat[0].cardinality))
 
     # Log dataset info
     info(f"Dataset {dataset_name} has target dimension: {target_dim}")
@@ -257,7 +257,7 @@ def main(
 
     #Warm start GP 
     gp_callback = GPWarmStart(data_loader,
-                          n_epochs=17,
+                          n_epochs=2,
                           lr=1e-2,
                           info=info,
                           trained_prior=model_params["trained_prior"])

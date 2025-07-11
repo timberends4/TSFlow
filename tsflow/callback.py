@@ -18,9 +18,6 @@ from gluonts.evaluation import (
 from pytorch_lightning import Callback
 from tqdm.auto import tqdm
 
-from gpytorch.mlls import ExactMarginalLogLikelihood, PredictiveLogLikelihood
-from gpytorch.mlls import VariationalELBO
-
 
 from tsflow.utils import Setting
 from tsflow.utils.plots import plot_figures
@@ -172,25 +169,6 @@ class GPWarmStart(Callback):
 
             self.info("Logged vertical GP prior-sample subplots")
 
-    def estimate_empirical_covariance(self, context: torch.Tensor) -> torch.Tensor:
-        B, Lc, C = context.shape
-        X = context.reshape(B * Lc, C)  # [N, C]
-
-        mean = X.mean(dim=0, keepdim=True)   # [1, C]
-        X_centered = X - mean                # [N, C]
-
-        cov = (X_centered.T @ X_centered) / (X_centered.shape[0] - 1)  # [C, C]
-        std = torch.sqrt(torch.diag(cov))       # [C]
-
-        # 4) inverse std voor normalisatie
-        inv_std = std.pow(-1)                   # [C]
-
-        # 5) bereken correlatiematrix via broadcasting
-        #    corr_{ij} = cov_{ij} * inv_std_i * inv_std_j
-        corr = cov * inv_std.unsqueeze(1) * inv_std.unsqueeze(0)  # [C, C]
-
-        return corr
-
 
     def compute_wasserstein_avg(self, gp, pl_module, device):
         if pl_module.trained_prior:
@@ -200,70 +178,77 @@ class GPWarmStart(Callback):
         num_samples = 1000
 
         for data in self.train_loader:
-            # — your existing preprocessing & GP sampling —
             scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = \
-                self.preprocess_input(pl_module, data, device, pl_module.context_length, pl_module.prior_context_length)
-            
-
-            # emp_cov = self.estimate_empirical_covariance(scaled_prior_context.cpu())
-            # self.info(f"Empirical context correlation matrix:\n{emp_cov.numpy()}")
+                self.preprocess_input(
+                    pl_module, data, device,
+                    pl_module.context_length,
+                    pl_module.prior_context_length
+                )
 
             batch_size, length, c = x1.shape
 
-            # GP prior samples
-            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):    
+            # — GP prior samples —
+            if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
+                # unchanged
                 dist = gp.gp_regression(
                     rearrange(scaled_prior_context, "b l c -> (b c) l"),
                     gp.prediction_length
-                )       
-
-                fut_samples = dist.rsample(torch.Size([num_samples]))  # [K, L_f, C]
-                
-                num_channels = scaled_prior_context.size(-1)
-                L = pl_module.prediction_length
-                fut_samples = fut_samples.view(num_samples, L, num_channels)
-
-            elif pl_module.prior_name in ("Q0DistMultiTask"):
-                dist = gp.gp_regression(
-                    rearrange(scaled_prior_context, "b l c -> (b c) l"),
-                    gp.prediction_length, pl_module.context_length
                 )
-                fut_samples = dist[0].rsample(torch.Size([num_samples]))  # [K, L_f, C]
-                
+                fut_samples = dist.rsample(torch.Size([num_samples]))    # [num_samps, L_f, C]
                 num_channels = scaled_prior_context.size(-1)
-                L = pl_module.prediction_length
-                fut_samples = fut_samples.view(num_samples, L, num_channels)
+                L_f = pl_module.prediction_length
+                fut_samples = fut_samples.view(num_samples, L_f, num_channels)
 
-            # repeat context
-            x0_repeated = scaled_context.repeat(num_samples, 1, 1)    # [K, L_c, C]
-            # joint samples: [context | future]
+            elif pl_module.prior_name == "Q0DistMultiTask":
+                # —— new, batched‐GP branch —— 
+                # 1) prepare 3D context [B, C, L_c]
+                x_context = scaled_prior_context.permute(0, 2, 1).to(device)
 
-            x0_samples = torch.cat([x0_repeated, fut_samples], dim=-2) # [K, L_c+L_f, C]
+                # 2) get a batched MultitaskMultivariateNormal with batch_shape=[B]
+                dist = gp.gp_regression(
+                    x_context,
+                    gp.prediction_length,
+                    pl_module.context_length
+                )
+
+                # 3) sample → shape [num_samples, B, L_f, C]
+                fut_samples = dist.rsample(torch.Size([num_samples]))
+                S, B, L_f, C = fut_samples.shape
+
+                # 4) flatten to [K, L_f, C], where K = S * B
+                K = S * B
+                fut_samples = fut_samples.reshape(K, L_f, C)
+
+            else:
+                # leave other priors untouched
+                raise ValueError(f"Unknown prior {pl_module.prior_name}")
+
+            # — now everything else is the same —
+            # repeat context to match K samples: [B, L_c, C] → [K, L_c, C]
+            x0_repeated = scaled_context.repeat(num_samples, 1, 1)
+
+            # joint samples [context | future]
+            x0_samples = torch.cat([x0_repeated, fut_samples], dim=-2)  # [K, L_c+L_f, C]
 
             # compute GP‐based WD
             wd_batch = wasserstein(x0_samples, x1)
             wd.append(wd_batch)
 
-            # — now the isotropic baseline —
-            # sample future from N(0,1) with same shape
-            fut_iso = torch.randn_like(fut_samples)               # [K, L_f, C]
-            x_iso_samples = torch.cat([x0_repeated, fut_iso], dim=-2) # [K, L_c+L_f, C]
-
-            # compute isotropic WD
+            # isotropic baseline
+            fut_iso = torch.randn_like(fut_samples)                      # [K, L_f, C]
+            x_iso_samples = torch.cat([x0_repeated, fut_iso], dim=-2)    # [K, L_c+L_f, C]
             wd_iso_batch = wasserstein(x_iso_samples, x1)
             wd_iso.append(wd_iso_batch)
-
-            # break
             
-
+            break
         # average over all batches
         avg_ws     = float(np.mean(wd))
         avg_ws_iso = float(np.mean(wd_iso))
         rel_ws     = avg_ws / avg_ws_iso if avg_ws_iso != 0 else float('inf')
 
-        self.info(f"Wasserstein distance (Prior):      {avg_ws:.4f}")
-        self.info(f"Wasserstein distance (isotropic prior): {avg_ws_iso:.4f}")
-        self.info(f"Relative WD (Prior / isotropic prior):           {rel_ws:.4f}")
+        self.info(f"Wasserstein distance (Prior):             {avg_ws:.4f}")
+        self.info(f"Wasserstein distance (isotropic prior):    {avg_ws_iso:.4f}")
+        self.info(f"Relative WD (Prior / isotropic prior):     {rel_ws:.4f}")
 
         if pl_module.trained_prior:
             gp.model.train(); gp.likelihood.train()
@@ -278,39 +263,6 @@ class GPWarmStart(Callback):
         # WARM-START LOOP
         # ---------------------------------------------------
         batch0 = next(iter(self.train_loader))
-
-        if pl_module.prior_name == "Q0DistKf":
-            device, dtype = gp.kx_row.device, gp.kx_row.dtype
-
-            all_Y = []
-
-            for batch in self.train_loader:
-                # 1) get [B, N, C]
-                scaled_prior_context, *_ = self.preprocess_input(
-                    pl_module, batch, device,
-                    pl_module.context_length,
-                    pl_module.prior_context_length,
-                )  # shape [B, N, C]
-
-                # 2) flatten time & batch dims → [B*N, C]
-                X = rearrange(scaled_prior_context, "b n c -> (b n) c")
-
-                # 3) de-bias per column (task)
-                mean = X.mean(dim=0, keepdim=True)   # [1, C]
-                Yc  = X - mean                       # [B*N, C]
-
-                all_Y.append(Yc)
-
-            # 4) concatenate all windows → [T, C], where T = sum_b (B*N)
-            Y = torch.cat(all_Y, dim=0).to(device=device, dtype=dtype)  # [T, C]
-
-            # 5) empirical covariance of shape [C, C]
-            #    (we use 1/T so it matches the paper’s 1/N for each window)
-            T = Y.shape[0]
-            Kf = (Y.T @ Y) / T   # → [C, C]
-
-            # 6) warm‐start the GP module with that C×C matrix
-            gp.set_task_kernel(Kf)
 
         # self.plot_samples_and_context(pl_module, trainer, batch0 ,100, "Prior Fixed Time Kernel Only")
         # self.compute_wasserstein_avg(gp, pl_module, device)
@@ -344,30 +296,30 @@ class GPWarmStart(Callback):
             for epoch in range(self.n_epochs):
                 epoch_loss = 0.0
 
-                for batch in self.train_loader:
+                for batch in tqdm(self.train_loader):
                 
                     scaled_prior_context, scaled_context, x1, scaled_future, loc, scale = self.preprocess_input(pl_module, batch, device, pl_module.context_length, pl_module.prior_context_length)
                     batch_size, length, c = x1.shape
-
-
-                    gp.model.train(); gp.likelihood.train()
+                
                     optimizer.zero_grad()
 
                     with gpytorch.settings.fast_computations(
-                        covar_root_decomposition=False,
-                        solves=False,
-                        log_prob=False,
-                    ):
+                        covar_root_decomposition=False,  # don’t form full root
+                        solves=True,                     # use conjugate gradients
+                        log_prob=True                    # also CG‐solve the quadratic form
+                    ), gpytorch.settings.max_cg_iterations(50):
                         dist = gp.gp_regression(rearrange(scaled_prior_context, "b l c -> (b c) l"), gp.prediction_length, pl_module.context_length)
                         if pl_module.prior_name in ("Q0Dist", "Q0DistKf"):
                             loss = -dist.log_prob(rearrange(scaled_future, "b l c -> (b c) l")).mean()
                         elif pl_module.prior_name == "Q0DistMultiTask":
-                            loss = -dist[0].log_prob(scaled_future).mean()
-
+                            loss = -dist.log_prob(scaled_future).mean()
                         loss.backward()
                         optimizer.step()
 
-                        epoch_loss += loss.item()
+                    del dist
+                    torch.cuda.empty_cache()
+
+                    epoch_loss += loss.item()
 
                 self.info(f"[Warm-start] Epoch {epoch+1}/{self.n_epochs}  loss={epoch_loss:.3f}")
 
@@ -376,18 +328,6 @@ class GPWarmStart(Callback):
                 param.requires_grad_(False)
                 self.info(f"Likelihood param: {name} | value: {param.data.cpu().numpy()}")
 
-                if "covar_factor" in name:
-                    # Compute full task covariance matrix
-                    B_full = param @ param.T  # [num_tasks, num_tasks]
-                    
-                    # Compute correlation matrix
-                    diag = torch.diag(B_full).sqrt()
-                    denom = diag.unsqueeze(0) * diag.unsqueeze(1)
-                    corr = B_full / (denom + 1e-8)  # add epsilon for numerical stability
-
-                    # Log or print
-                    self.info(f"Full task covariance matrix B:\n{B_full.cpu().numpy()}")
-                    self.info(f"Task correlation matrix:\n{corr.cpu().numpy()}")
 
             self.info("Freezing GP likelihood parameters:")
             for name, param in gp.likelihood.named_parameters():

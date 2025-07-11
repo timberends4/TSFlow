@@ -17,16 +17,16 @@ model_params:
   context_length: 24 # 360 for `D`
   prediction_length: 24 # 30 for `D`
  
-  use_ema: False
-  use_lags: False
+  use_ema: True
+  use_lags: True
   
   num_steps: 32
   solver: euler
   matching: random
 
   device: cuda:0
-  prior_name: Q0Dist
-  trained_prior: False
+  prior_name: Q0DistMultiTask
+  trained_prior: True
     
   optimizer_params: 
     lr: 1.e-3
@@ -56,7 +56,7 @@ trainer_params:
 # Used only in callback,
 # the final evaluation uses 100 samples
 evaluation_params:
-  num_samples: 16
+  num_samples: 50
   use_validation_set: True
   eval_every: 10
   do_final_eval: True
